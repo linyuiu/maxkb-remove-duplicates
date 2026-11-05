@@ -16,7 +16,6 @@
 └── docker/
     ├── Dockerfile          # FastAPI 直接提供前端页面及接口
     ├── compose.yaml        # 运行模板，安装时复制到应用工作目录
-    ├── install.sh          # 兼容旧入口，转交 install/install.sh
     └── images/             # 应用和 PostgreSQL 镜像包
 ```
 

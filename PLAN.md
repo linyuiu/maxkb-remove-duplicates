@@ -97,7 +97,7 @@ Dockerfile 和 Compose 集中在 `docker/`，根目录 `.env` 手动从 `.env.ex
 
 ## 安装模板与工作目录
 
-最新约定：安装模板移至 `install/.env.example`，脚本主体为 `install/install.sh`，原 `docker/install.sh` 作为兼容入口。读取模板 WORK_DIR，在其下创建 `maxkb-remove-duplicates` 应用目录，生成实际 `.env`，并创建 postgres/ingestion/documents 三个子目录，Compose 分别挂载数据库、入库文件和本地文档来源。已有工作目录配置不覆盖。原项目根目录 `.env` 不改动，源码运行支持 APP_ENV_FILE 指定新配置；容器直接注入实际配置。原命名卷不自动迁移或删除。按用户要求不执行本机 Docker 构建或运行验证。
+最新约定：安装模板移至 `install/.env.example`，脚本主体为 `install/install.sh`，不再保留 docker 目录下的兼容安装入口。读取模板 WORK_DIR，在其下创建 `maxkb-remove-duplicates` 应用目录，生成实际 `.env`，并创建 postgres/ingestion/documents 三个子目录，Compose 分别挂载数据库、入库文件和本地文档来源。已有工作目录配置不覆盖。原项目根目录 `.env` 不改动，源码运行支持 APP_ENV_FILE 指定新配置；容器直接注入实际配置。原命名卷不自动迁移或删除。按用户要求不执行本机 Docker 构建或运行验证。
 
 ## 工作目录内独立运维
 

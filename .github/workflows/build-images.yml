@@ -107,7 +107,7 @@ jobs:
           directory="$RUNNER_TEMP/$package"
           mkdir -p "$directory/install" "$directory/docker/images" output
           cp install/install.sh install/.env.example "$directory/install/"
-          cp docker/compose.yaml docker/install.sh "$directory/docker/"
+          cp docker/compose.yaml "$directory/docker/"
           cp README.md "$directory/README.md"
           export PACKAGE_DIRECTORY="$directory"
           python3 - <<'PYTHON'
