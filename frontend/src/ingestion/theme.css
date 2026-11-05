@@ -1,0 +1,76 @@
+/* The scoped ingestion workbench shares the app's neutral, readable theme. */
+:host {
+  --accent: #242424;
+  --line: #e5e5e5;
+  --muted: #525252;
+}
+.glass-select-trigger,
+.glass-select-trigger:hover,
+.glass-select-trigger[aria-expanded=true] {
+  background: #fff;
+  color: #202020;
+  border-color: #d4d4d4;
+  box-shadow: none;
+  font-size: 14px;
+}
+.glass-select-trigger[aria-expanded=true] {
+  border-color: #737373;
+  box-shadow: 0 0 0 2px #2424240a;
+}
+.glass-select-arrow,
+.glass-select-check { color: #404040; }
+.glass-select-menu {
+  background: #fff;
+  color: #202020;
+  border: 1px solid #e5e5e5;
+  border-radius: 14px;
+  box-shadow: 0 12px 32px #0000001a;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.glass-select-menu-heading {
+  color: #525252;
+  font-size: 12px;
+  border-bottom-color: #e5e5e5;
+}
+.glass-select-option { border-radius: 9px; }
+.glass-select-option-title { font-size: 14px; font-weight: 500; }
+.glass-select-option-note { color: #525252; font-size: 13px; }
+.glass-select-option[aria-selected=true] {
+  background: #f2f2f2;
+  border-color: transparent;
+}
+.glass-select-option.is-active {
+  background: #eaeaea;
+  border-color: transparent;
+}
+dialog {
+  font-size: 14px;
+  -webkit-backdrop-filter: none;
+}
+dialog::backdrop {
+  background: #00000040;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+dialog dl,
+.knowledge-plan-group,
+.cleanup-option,
+.knowledge-dialog .dialog-actions {
+  background: #fafafa;
+  border-color: #e5e5e5;
+  box-shadow: none;
+}
+dialog dt { color: #525252; font-size: 13px; }
+dialog dd { color: #202020; font-size: 14px; }
+.button.retry,
+.button.retry:hover:not(:disabled) {
+  background: #f5f5f5;
+  color: #303030;
+  border-color: #d4d4d4;
+  box-shadow: none;
+}
+button:focus-visible, input:focus-visible, textarea:focus-visible,
+select:focus-visible, [tabindex]:focus-visible {
+  outline-color: #525252;
+}

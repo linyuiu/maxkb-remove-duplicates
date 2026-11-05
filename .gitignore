@@ -1,0 +1,27 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+frontend/node_modules/
+frontend/dist/
+backend/tests/sql/node_modules/
+*.db
+
+data/
+
+sources/
+*.tar
+
+
+.env.tmp.*
+docker/images/*
+!docker/images/.gitkeep
+
+# Default installation workspace (configuration and persistent data)
+work/
+
+# Keep only the deployment template; never upload actual environment files.
+.env.*
+!install/.env.example
+.idea/
+*.log

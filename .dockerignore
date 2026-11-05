@@ -1,0 +1,22 @@
+.git
+.env
+.env.*
+**/.env
+**/.env.*
+docker/images
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/*.py[cod]
+**/node_modules
+frontend/dist
+backend/tests
+data
+sources
+**/sources
+**/*.log
+**/*.tar
+.idea
+
+# Default installation workspace (configuration and persistent data)
+work/

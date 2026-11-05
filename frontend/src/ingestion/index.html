@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#edf3fc"><title>文档入库工作台 · MinerU → MaxKB</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css?v=20261102.5"><script src="/static/glass-select.js?v=20261102.5" defer></script><script src="/static/app.js?v=20261102.5" defer></script><script src="/static/history.js?v=20261102.5" defer></script><script src="/static/history-cleanup.js?v=20261102.5" defer></script><script src="/static/mineru-records.js?v=20261102.5" defer></script><script src="/static/knowledge.js?v=20261102.5" defer></script><script src="/static/sources.js?v=20261102.5" defer></script>
+</head>
+<body>
+<header class="topbar"><a class="brand" href="/"><img src="/static/logo.svg" alt="" width="34" height="34"><span>文档入库工作台<small>MinerU <span aria-hidden="true">→</span> MaxKB</small></span></a><nav class="page-nav" aria-label="工作台页面"><a href="/" data-page="workbench">文档工作台</a><a href="/sources" data-page="sources">文件同步</a><a href="/history" data-page="history">历史记录</a><a href="/settings" data-page="settings">参数设置</a></nav><div class="top-actions"><span id="connection" class="connection">连接中</span></div></header>
+<main>
+  <div class="page-heading"><h1>文档工作台</h1></div>
+  <div id="notice" class="notice" role="status" hidden></div>
+  <div class="layout">
+    <section id="history-panel" class="card history-panel" hidden>
+      <div class="card-heading"><h2>全部处理记录</h2><div class="history-record-actions"><button id="history-refresh" class="button secondary small">刷新</button><button id="history-cleanup-open" class="button quiet small danger-text">清除历史</button></div></div>
+      <div id="history-summary" class="history-summary"></div>
+      <div class="history-toolbar">
+        <div class="history-tabs" role="group" aria-label="历史记录类型"><button class="button quiet" data-history-view="batches" aria-pressed="true">批次记录</button><button class="button quiet" data-history-view="files" aria-pressed="false">文件记录</button></div>
+        <label class="history-search">搜索<input id="history-search" type="search" maxlength="200" placeholder="任务 / 批次名称 / 文件名 / 路径"></label>
+        <label id="history-state-field" title="批次列表显示包含该状态文件的批次，统计仍为整批；展开后仅显示该状态文件。">入库 / 处理状态<select id="history-state"><option value="all">全部状态</option><option value="pending">等待处理</option><option value="active">处理中</option><option value="review">等待入库确认</option><option value="importing">排队入库 / 入库中</option><option value="imported">已入库</option><option value="import_failed">入库失败 / 被拒绝</option><option value="uncertain">结果待核对 / 清理失败</option><option value="failed">全部异常文件</option></select></label>
+      </div>
+      <p id="history-error" class="file-error history-empty" role="status" hidden></p>
+      <div id="history-results" aria-live="polite" aria-busy="false"></div>
+      <div id="history-pager" class="preview-pager" hidden><button id="history-prev" class="button secondary small">上一页</button><span id="history-page"></span><button id="history-next" class="button secondary small">下一页</button></div>
+    </section>
+    <aside class="settings-panel card">
+      <div class="card-heading"><div><h2>连接与参数</h2></div><span id="config-state" class="badge">未配置</span></div>
+      <form id="settings-form">
+        <fieldset><legend><span class="service-dot mineru"></span>MinerU 解析服务</legend>
+          <label>服务地址<input name="mineru_url" type="url" required placeholder="http://服务器IP:8000"><small>填写服务根地址，无需加 /v1。</small></label>
+          <label>API Key <span class="optional">可选</span><input name="mineru_key" type="password" autocomplete="off" placeholder="未启用鉴权时留空"><small id="mineru-key-help">仅在 MinerU 启用鉴权时填写。</small></label>
+          <div class="field-row"><label>解析档位<select name="tier"><option value="flash">flash</option><option value="basic">basic</option><option value="standard">standard</option><option value="advanced">advanced</option></select><small>需与服务支持的档位一致。</small></label><label>页码范围 <span class="optional">可选</span><input name="page_range" placeholder="如 1-5,8"><small>留空解析全部页面。</small></label></div>
+        </fieldset>
+        <fieldset><legend><span class="service-dot maxkb"></span>MaxKB 知识库</legend>
+          <label>API 根地址<input name="maxkb_base_url" type="url" required placeholder="https://域名/admin/api"><small>工作空间与知识库 ID 分别填写在下方。</small></label>
+          <label>访问令牌<input name="maxkb_token" type="password" autocomplete="off" placeholder="填写 MaxKB 令牌"><small id="token-help">凭据仅保存在服务端，不会返回到浏览器。</small></label>
+          <label>工作空间 ID<input name="workspace_id" required placeholder="default"><small>例如 default，也可填写其他工作空间 ID。</small></label>
+        </fieldset>
+        <fieldset><legend>切片设置（PDF / Word）</legend>
+          <label>切片最大长度<input name="limit" type="number" min="1" max="100000" required><small>传给 MaxKB 的 limit，默认 2500 字符。</small></label>
+          <label>标题规则<select id="pattern-preset"><option value="h1">按一级标题 # 切片</option><option value="custom">自定义正则规则</option></select><small>默认使用一级标题，长段落受最大长度限制。</small></label>
+          <label id="custom-patterns" hidden>正则表达式<textarea name="patterns" rows="3" spellcheck="false"></textarea><small>每行一条规则，按原样传给 MaxKB。</small></label>
+          <label class="checkbox-label"><input name="with_filter" type="checkbox"><span>启用 MaxKB 内容过滤<small>由 MaxKB 按其切片接口规则过滤内容。</small></span></label>
+        </fieldset>
+        <fieldset><legend>标签设置</legend>
+          <label class="checkbox-label"><input name="knowledge_tags_enabled" type="checkbox" checked><span>创建知识库预设标签<small>开启后，创建知识库时可勾选要准备的标签；不会自动覆盖文档的单独标签。</small></span></label>
+          <label class="checkbox-label"><input name="document_tags_enabled" type="checkbox" checked><span>给入库文档绑定标签<small>可继承知识库标签，也可对一个或多个文档单独指定标签。关闭后不发送文档标签请求。</small></span></label>
+          <label class="checkbox-label"><input name="inherit_knowledge_tags" type="checkbox" checked><span>默认将知识库预设标签应用到全部文档<small>每个知识库均可在任务确认时单独修改；文档专属标签与继承标签合并去重。</small></span></label>
+        </fieldset>
+        <fieldset><legend>分批队列</legend>
+          <label>每批文件数<input name="batch_size" type="number" min="1" max="100" value="100" required><small>默认 100 个一批；全部原文件到齐后开始。当前批入库核验完成后进入下一批。</small></label>
+          <label>Excel 默认导入模式<select name="excel_mode"><option value="table">表格 table</option><option value="qa">问答对 qa</option></select><small>选择文件后可逐个修改；请使用 MaxKB 对应模板。</small></label>
+          <label class="checkbox-label"><input name="auto_import" type="checkbox"><span>文件准备完成后自动入库<small>默认关闭。开启后创建队列时确认目标，后台自动入库并核对结果。</small></span></label>
+        </fieldset>
+        <details><summary>高级参数</summary><div class="advanced">
+          <label>解析等待上限（秒）<input name="parse_timeout" type="number" min="1" max="86400" required><small>超时后停止等待；重试会继续已有任务。</small></label>
+          <label>文件传输超时（秒）<input name="transfer_timeout" type="number" min="1" max="86400" required><small>上传、下载、切片及入库请求的等待时间。</small></label>
+          <label>普通请求超时（秒）<input name="request_timeout" type="number" min="1" max="3600" required><small>健康检查、创建任务等请求的等待时间。</small></label>
+          <label>状态轮询间隔（秒）<input name="poll_interval" type="number" min="0.5" max="60" step="0.5" required><small>后台查询 MinerU 状态的间隔。</small></label>
+          <label>入库状态查询间隔（秒）<input name="import_poll_interval" type="number" min="1" max="300" value="5" required><small>后台查询 MaxKB 文档状态，不占用解析线程。</small></label>
+          <label>入库处理等待上限（秒）<input name="import_timeout" type="number" min="30" max="172800" value="7200" required><small>超时标记为待核对，保留文档，避免误删仍在处理的任务。</small></label>
+          <label class="checkbox-label"><input id="clear-key" type="checkbox"><span>清除已保存的 MinerU API Key</span></label>
+        </div></details>
+        <button id="save-settings" type="submit" class="button secondary full">保存参数</button>
+      </form>
+    </aside>
+    <section class="sources-panel" hidden>
+      <div class="sources-grid">
+        <section class="card source-config"><div class="card-heading"><div><h2>远程 SSH 配置</h2><p class="source-hint">文档在另一台服务器时使用；同机文档请在“可用文档目录”中选择本地映射。</p></div></div>
+          <form id="ssh-form" class="source-form">
+            <label>服务器配置<select id="ssh-config"><option value="">新增服务器</option></select></label>
+            <label>配置名称<input name="name" required maxlength="100" placeholder="例如：研发文档服务器"></label>
+            <div class="field-row"><label>服务器地址<input name="host" required placeholder="IP 或主机名"><small>填写文件所在服务器，不需要 http://。</small></label><label>SSH 端口<input name="port" type="number" value="22" min="1" max="65535" required></label></div>
+            <label>SSH 用户<input name="username" required placeholder="具有文档目录读写权限的用户"></label>
+            <label>远程源目录<input name="remote_path" required placeholder="/data/documents"><small>填写原始文档根目录的绝对路径，递归同步 PDF、Word、Excel；自动跳过“已处理文档”。</small></label>
+            <label>认证方式<select name="auth"><option value="password">用户名和密码</option><option value="key">SSH 私钥</option></select></label>
+            <label id="ssh-password-field">SSH 密码<input name="password" type="password" autocomplete="new-password" placeholder="首次填写，保存后留空沿用"></label>
+            <div id="ssh-key-fields" hidden><label>SSH 私钥<textarea name="private_key" rows="5" autocomplete="off" placeholder="粘贴 OpenSSH / PEM 私钥，保存后留空沿用"></textarea></label><label>私钥口令（可选）<input name="passphrase" type="password" autocomplete="off"></label></div>
+            <label>同步速度上限（MB/s）<input name="bandwidth_mb" type="number" value="0" min="0" max="10000" step="0.1"><small>0 表示不限速。同步使用独立后台线程，不占 MinerU 解析名额。</small></label>
+            <p id="ssh-fingerprint" class="source-hint">尚未记录主机指纹</p>
+            <div class="source-actions"><button id="ssh-save" class="button secondary" type="submit">保存配置</button><button id="ssh-test" class="button quiet" type="button">测试连接</button><button id="ssh-scan" class="button secondary" type="button">扫描远程目录</button><button id="ssh-sync" class="button primary" type="button">同步本轮文件</button></div>
+          </form>
+          <section class="remote-scan-preview" aria-labelledby="remote-scan-title">
+            <h3 id="remote-scan-title">扫描结果</h3>
+            <p id="remote-scan-summary" class="source-hint" role="status">尚未扫描。</p>
+
+            <div id="remote-scan-results" hidden>
+
+              <div id="remote-scan-files"></div>
+              <div class="preview-pager"><button id="remote-scan-prev" type="button" class="button quiet small">上一页</button><span id="remote-scan-page"></span><button id="remote-scan-next" type="button" class="button quiet small">下一页</button></div>
+            </div>
+          </section>
+        </section>
+        <section class="card"><div class="card-heading"><div><h2>可用文档目录</h2><p class="source-hint">本地映射直接扫描；SSH 先扫描远程目录、同步文件，再在工作台刷新已同步文件。</p></div><button id="source-refresh" class="button quiet small">刷新</button></div><div id="source-directory-list" class="source-directory-list"></div></section>
+      </div>
+      <section class="card source-records"><div class="card-heading"><h2>可选标签库</h2><p class="source-hint">在此维护标签名称和值，创建任务时分别用于知识库预设或文档专属标签。是否启用请到“参数设置 → 标签设置”调整。</p></div><div class="knowledge-settings"><div id="knowledge-tag-list"></div><div class="source-actions"><button id="knowledge-tag-add" type="button" class="button quiet">添加标签</button><button id="knowledge-tag-save" type="button" class="button secondary">保存标签</button></div><p id="knowledge-tag-message" class="muted" role="status"></p></div></section>
+      <section class="card source-records"><div class="card-heading"><div><h2>扫描、同步与归档记录</h2></div></div><div id="sync-job-list"></div></section>
+    </section>
+    <div class="workspace">
+      <section class="card document-origin"><label>文档来源<select id="document-origin"><option value="browser">上传</option><option value="mapped">映射</option><option value="ssh">同步目录</option></select></label><label id="document-sync-control" hidden>同步目录<select id="document-sync-source"></select></label><p id="document-origin-help" class="source-hint">文档在当前电脑：浏览器上传；在工作台服务器：本地映射；在其他服务器：远程 SSH 同步。</p></section>
+      <section id="directory-intake" class="card" hidden><div class="card-heading"><div><h2>选择服务器文档</h2></div><span id="directory-location" class="badge subtle"></span></div><div class="directory-toolbar"><label>子目录（可选）<input id="directory-folder" placeholder="例如：部门A/设备；留空扫描根目录"></label><button id="directory-scan" class="button secondary">扫描目录</button></div><div id="directory-results" hidden><div class="directory-toolbar"><label>文件筛选<input id="directory-search" type="search" placeholder="搜索文件名或路径"></label><label>文档类型<select id="directory-kind"><option value="all">全部类型</option><option value="pdf">PDF</option><option value="word">Word</option><option value="excel">Excel</option></select></label><label>Excel 导入方式<select id="directory-excel-mode"><option value="table">表格 table</option><option value="qa">问答对 qa</option></select></label></div><div class="directory-selection"><label class="checkbox-label"><input id="directory-select-all" type="checkbox">全选筛选结果</label><span id="directory-selection-count" class="muted"></span><button id="directory-import" class="button primary" disabled>处理所选文件 →</button></div><div id="directory-file-list"></div><div class="preview-pager"><button id="directory-prev" class="button quiet small">上一页</button><span id="directory-page"></span><button id="directory-next" class="button quiet small">下一页</button></div></div><p id="directory-empty" class="source-hint padded">读取文件列表后勾选处理；SSH 来源读取工作台本机已下载文件，远程新增文件需先同步。</p><div id="directory-job-list"></div></section>
+      <section class="upload-card card" aria-labelledby="upload-title"><div class="card-heading"><div><h2 id="upload-title">添加文档</h2></div></div>
+        <div class="format-upload-grid">
+          <button id="dropzone" class="format-upload dropzone" type="button" aria-label="选择 PDF 文件"><span class="format-icon">PDF</span><strong>PDF 文档</strong><span id="pending-pdf-count" class="badge subtle">0 个待上传</span></button>
+          <button id="choose-word" class="format-upload" type="button"><span class="format-icon word">W</span><strong>Word 文档</strong><span id="pending-word-count" class="badge subtle">0 个待上传</span></button>
+          <button id="choose-excel" class="format-upload" type="button"><span class="format-icon excel">X</span><strong>Excel 工作簿</strong><span id="pending-excel-count" class="badge subtle">0 个待上传</span></button>
+        </div>
+        <p id="upload-limits" class="upload-limit-note"></p>
+        <input id="file-input" type="file" accept=".pdf,application/pdf" multiple hidden>
+        <input id="word-input" type="file" accept=".doc,.docx" multiple hidden>
+        <input id="excel-input" type="file" accept=".xls,.xlsx" multiple hidden>
+        <input id="folder-input" type="file" webkitdirectory multiple hidden>
+        <div class="upload-actions"><button id="choose-folder" class="button quiet small">选择文件夹</button><span id="pending-label">还没有选择文件</span><button id="clear-files" class="button quiet small" hidden>清空</button><button id="start" class="button primary" disabled>开始处理 <span aria-hidden="true">→</span></button></div>
+        <div id="pending-files" class="pending-files" hidden></div><div id="upload-progress" class="upload-progress" hidden><progress id="upload-bar" max="100" value="0"></progress><span id="upload-text">正在上传</span></div>
+      </section>
+      <section id="folder-queue" class="card folder-queue" hidden>
+        <div class="card-heading"><div><h2>分批任务</h2></div><div class="history-record-actions"><button id="queue-stop" class="button quiet small" type="button">停止任务</button><button id="queue-refresh" class="button quiet small">刷新状态</button><button id="resume-upload" class="button secondary small">继续上传</button></div></div>
+        <div id="knowledge-target-list" class="knowledge-settings"></div><div id="folder-summary" class="batch-target"></div>
+        <p class="queue-hint">全部文件上传完成后才开始处理；中断后重新选择同一文件夹可继续上传。</p>
+        <div id="queue-problems" class="source-hint padded" hidden></div>
+        <p id="queue-refresh-error" class="file-error padded" role="status" hidden></p>
+        <div id="queue-problems-pager" class="preview-pager" hidden><button id="queue-problems-prev" class="button quiet small">上一页异常</button><span id="queue-problems-page" role="status"></span><button id="queue-problems-next" class="button quiet small">下一页异常</button></div>
+        <a id="queue-report" class="button quiet small" download>下载完整处理报告（含失败清单）</a>
+        <div id="wave-list" class="wave-list"></div>
+        <div class="preview-pager"><button id="wave-prev" class="button quiet small">上一组</button><span id="wave-page"></span><button id="wave-next" class="button quiet small">下一组</button></div>
+      </section>
+      <section class="queue-card card" aria-labelledby="queue-title">
+        <div class="card-heading"><div><h2 id="queue-title">文件队列 <span id="file-count" class="count">0</span></h2></div><span id="worker-info" class="muted"></span></div>
+        <div id="batch-target" class="batch-target" hidden></div>
+        <div id="batch-summary" class="summary-strip" hidden><div><strong id="stat-total">0</strong><span>文件总数</span></div><div><strong id="stat-active">0</strong><span>正在处理</span></div><div><strong id="stat-ready">0</strong><span>等待入库</span></div><div><strong id="stat-done">0</strong><span>已入库</span></div></div>
+        <div id="queue-empty" class="empty-state"><span class="empty-icon" aria-hidden="true">▤</span><strong>暂无文件</strong></div>
+        <div id="queue-list" class="queue-list"></div>
+        <div id="queue-footer" class="queue-footer" hidden><label class="checkbox-label"><input id="select-ready" type="checkbox"><span>全选待入库文件</span></label><span id="selection-count" class="muted">已选 0 个</span><button id="import-selected" class="button primary" disabled>导入所选文件</button></div>
+      </section>
+      <section id="mineru-records" class="card" aria-labelledby="mineru-records-title">
+        <div class="card-heading"><h2 id="mineru-records-title">MinerU 解析记录</h2><span id="mineru-records-scope" class="badge subtle">未选择任务</span></div>
+        <div class="mineru-summary" id="mineru-summary" hidden>
+          <div><strong id="mineru-total">0</strong><span>PDF 总数</span></div>
+          <div><strong id="mineru-pending">0</strong><span>待解析</span></div>
+          <div><strong id="mineru-processing">0</strong><span>进行中</span></div>
+          <div><strong id="mineru-succeeded">0</strong><span>解析成功</span></div>
+          <div><strong id="mineru-failed">0</strong><span>未完成</span></div>
+        </div>
+        <div class="mineru-toolbar">
+          <label>文件筛选<input id="mineru-search" type="search" maxlength="200" placeholder="搜索 PDF 文件名或路径"></label>
+          <label>解析状态<select id="mineru-state"><option value="all">全部状态</option><option value="pending">待解析</option><option value="processing">进行中</option><option value="succeeded">解析成功</option><option value="failed">失败 / 未完成</option></select></label>
+          <button id="mineru-refresh" type="button" class="button quiet small">刷新</button>
+        </div>
+        <p id="mineru-records-message" class="source-hint padded" role="status">暂无 PDF 解析记录</p>
+        <div id="mineru-records-list"></div>
+        <div id="mineru-records-pager" class="preview-pager" hidden><button id="mineru-prev" class="button secondary small" type="button">上一页</button><span id="mineru-page"></span><button id="mineru-next" class="button secondary small" type="button">下一页</button></div>
+      </section>
+      <section class="preview-card card" aria-labelledby="preview-title"><div class="card-heading"><div><h2 id="preview-title">文件预览</h2></div></div>
+        <div class="preview-toolbar">
+          <div id="preview-picker" class="preview-picker">
+            <button id="preview-select" type="button" class="preview-select" aria-label="选择预览文件" aria-expanded="false" aria-controls="preview-file-panel">
+              <span id="preview-selected-name">选择已准备好的文件</span>
+              <span id="preview-selected-count" class="preview-selected-count" hidden></span>
+              <svg class="picker-chevron" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <div id="preview-file-panel" class="preview-file-panel" hidden>
+              <div class="preview-file-panel-heading"><span id="preview-file-count">已完成切片 · 0 个文件</span><button id="preview-clear" type="button" class="button quiet small" hidden>清除选择</button></div>
+              <div id="preview-file-list" class="preview-file-list" role="listbox" aria-label="可预览文件"></div>
+              <p id="preview-file-empty" class="preview-file-empty">暂无可预览文件</p>
+            </div>
+          </div>
+          <button id="resplit" class="button quiet small" disabled>重新切片</button><a id="download-split" class="button quiet small" hidden download>下载切片 JSON</a>
+        </div>
+        <div id="preview-empty" class="empty-state"><span class="empty-icon" aria-hidden="true">⌕</span><strong>请选择预览文件</strong></div>
+        <div id="preview-info" class="preview-info" hidden></div><div id="preview-content" class="preview-content" aria-live="polite"></div>
+        <div id="preview-pager" class="preview-pager" hidden><button id="preview-prev" class="button secondary small">上一页</button><span id="preview-page"></span><button id="preview-next" class="button secondary small">下一页</button></div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<dialog id="history-cleanup-dialog" aria-labelledby="history-cleanup-title"><form id="history-cleanup-form">
+  <div class="dialog-heading"><h2 id="history-cleanup-title">清除历史记录</h2><button id="history-cleanup-close" type="button" class="button quiet" aria-label="关闭清理窗口">✕</button></div>
+  <p id="history-cleanup-summary"></p>
+  <label class="checkbox-label cleanup-option"><input id="cleanup-web-files" type="checkbox"><span>同时删除 Web 上传的文件<small id="cleanup-web-count"></small></span></label>
+  <label class="checkbox-label cleanup-option"><input id="cleanup-ssh-files" type="checkbox"><span>同时删除 SSH 同步文件及导入副本<small id="cleanup-ssh-count"></small></span></label>
+  <p id="history-cleanup-message" role="status"></p><div id="history-cleanup-blocked"></div>
+  <p class="cleanup-scope">不删除 MaxKB 文档、MinerU 服务端文件和源服务器原文件。历史清除不可撤销；保留清理日志与来源清单，备份不在清理范围内。</p>
+  <div class="dialog-actions"><button id="history-cleanup-retry" type="button" class="button secondary" hidden>重试文件清理</button><button id="history-cleanup-cancel" type="button" class="button secondary">取消</button><button id="history-cleanup-confirm" type="submit" class="button danger-button" disabled>确认清除历史</button></div>
+</form></dialog>
+<dialog id="knowledge-dialog" class="knowledge-dialog" aria-labelledby="knowledge-title"><form method="dialog">
+  <div class="dialog-heading"><h2 id="knowledge-title">确认知识库与标签</h2><button class="button quiet" value="cancel" formnovalidate aria-label="关闭知识库确认">✕</button></div>
+  <div class="knowledge-dialog-body" tabindex="0" aria-label="知识库目录和标签设置">
+    <p id="knowledge-plan-summary"></p><label>向量模型（仅新建知识库时使用）<select id="knowledge-model" required></select></label>
+    <section id="document-tag-editor" class="document-tag-editor" hidden>
+      <h3>文档专属标签</h3><p class="source-hint">勾选一个或多个文件，再选择标签并点击“为所选文档添加标签规则”。规则与知识库继承标签合并去重。</p>
+      <div class="document-tag-toolbar"><label>查找文件<input id="document-tag-search" type="search" placeholder="按文件名或相对路径筛选"></label><label class="checkbox-label"><input id="document-tag-select-page" type="checkbox">选择本页</label><span id="document-tag-selected" class="source-hint"></span></div>
+      <div id="document-tag-files"></div>
+      <div class="preview-pager"><button id="document-tag-prev" type="button" class="button quiet small">上一页</button><span id="document-tag-page"></span><button id="document-tag-next" type="button" class="button quiet small">下一页</button></div>
+      <div id="document-tag-choices" class="document-tag-choices"></div><button id="document-tag-add-rule" type="button" class="button secondary small">为所选文档添加标签规则</button><div id="document-tag-rules"></div>
+    </section>
+    <p id="knowledge-plan-error" class="file-error" role="status"></p><div id="knowledge-plan-list"></div>
+    <div id="knowledge-plan-pager" class="preview-pager" hidden><button id="knowledge-plan-prev" type="button" class="button quiet small">上一页</button><span id="knowledge-plan-page"></span><button id="knowledge-plan-next" type="button" class="button quiet small">下一页</button></div>
+  </div>
+  <div class="dialog-actions"><button class="button secondary" value="cancel" formnovalidate>取消</button><button id="knowledge-plan-confirm" class="button primary" value="confirm" disabled>确认并处理</button></div>
+</form></dialog>
+<dialog id="source-log-dialog"><div class="dialog-heading"><h2>文件任务记录</h2><button id="source-log-close" class="button quiet" aria-label="关闭记录">✕</button></div><div id="source-log-content"></div></dialog>
+<dialog id="import-dialog"><div class="dialog-heading"><h2>确认导入知识库</h2><button id="import-close" class="button quiet" aria-label="关闭导入确认">✕</button></div><p id="import-description"></p><dl id="import-target"></dl><div class="dialog-actions"><button id="import-cancel" class="button secondary">返回检查</button><button id="import-confirm" class="button primary">确认入库</button></div></dialog>
+<dialog id="audit-dialog"><div class="dialog-heading"><h2>入库状态与任务日志</h2><button id="audit-close" class="button quiet" aria-label="关闭日志">✕</button></div><div id="audit-content"></div></dialog>
+</body></html>
