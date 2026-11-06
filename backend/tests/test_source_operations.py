@@ -52,8 +52,9 @@ def connection():
 @pytest.mark.parametrize("kind", [
     "delete_document",
     "delete_paragraph",
+    "update_paragraph",
 ])
-def test_deletion_matches_each_pairs_own_snapshot(connection, kind):
+def test_mutation_matches_each_pairs_own_snapshot(connection, monkeypatch, kind):
     target = {
         "source_id": "source-a",
         "workspace_id": "default",
@@ -123,25 +124,46 @@ def test_deletion_matches_each_pairs_own_snapshot(connection, kind):
             before={"paragraphs": [{"id": "deleted-paragraph", "content": "original text"}]},
         ))
 
-    finish("operation", "user", "succeeded", None, None, connection=connection)
+    actual = {"content": "updated text"} if kind == "update_paragraph" else None
+    changed_status = "source_changed" if kind == "update_paragraph" else "resolved"
+    finish("operation", "user", "succeeded", actual, None, connection=connection)
 
     with Session(connection) as session:
         assert {row.id: row.status for row in session.scalars(select(Pair))} == {
-            "target": "resolved", "shared-paragraph": "resolved",
-            "same-paragraph-another-run": "resolved",
+            "target": changed_status, "shared-paragraph": changed_status,
+            "same-paragraph-another-run": changed_status,
             "same-document-right": "resolved" if kind == "delete_document" else "pending",
             "unrelated": "ignored", "moved-paragraph": "pending",
             "same-document-another-run": "resolved" if kind == "delete_document" else "pending", "different-source": "pending",
             "different-knowledge": "pending", "different-workspace": "pending",
         }
         operation = session.get(Operation, "operation")
-        assert operation.state == "succeeded" and operation.actual is None
+        assert operation.state == "succeeded" and operation.actual == actual
         assert operation.before["paragraphs"][0]["content"] == "original text"
         decisions = session.scalars(select(Decision)).all()
-        resolved = set(session.scalars(select(Pair.id).where(Pair.status == "resolved")))
+        resolved = set(session.scalars(select(Pair.id).where(Pair.status == changed_status)))
         assert {decision.pair_id for decision in decisions} == resolved
         assert len(decisions) == len(resolved)
-        assert all(decision.status == "resolved" and 'operation' in decision.note for decision in decisions)
+        assert all(decision.status == changed_status and 'operation' in decision.note for decision in decisions)
+        pending = set(session.scalars(select(Pair.id).where(Pair.status == "pending")))
+        assert not pending.intersection(resolved)
+        assert session.scalar(select(ParagraphSnapshot).where(
+            ParagraphSnapshot.run_id == "original",
+            ParagraphSnapshot.paragraph_id == "deleted-paragraph",
+        )) is not None
+
+    if kind == "update_paragraph":
+        from types import SimpleNamespace
+        from fastapi import HTTPException
+        from app import main
+        from app.source_operations import atomic
+
+        monkeypatch.setattr(main, "transaction", lambda: atomic(connection))
+        for status in ["pending", "resolved", "ignored"]:
+            with pytest.raises(HTTPException) as exc:
+                main.review("target", main.ReviewBody(status=status), SimpleNamespace(id="user"))
+            assert exc.value.status_code == 409
+            assert "需重新扫描" in exc.value.detail
 
 
 @pytest.mark.parametrize('scenario,kind,expected', [
@@ -205,5 +227,8 @@ def test_audit_operation_outcomes(connection, monkeypatch, scenario, kind, expec
         assert result.actual is None if kind!='update_paragraph' else result.actual['content']=='after'
     with Session(connection) as s:
         assert s.get(Operation,'op').state==expected
-        assert s.get(Pair,'pair').status==('resolved' if expected=='succeeded' else 'pending')
+        assert s.get(Pair,'pair').status == (
+            ('source_changed' if kind == 'update_paragraph' else 'resolved')
+            if expected == 'succeeded' else 'pending'
+        )
     if expected=='failed':assert '未发送修改/删除请求' in result.error

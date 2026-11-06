@@ -162,18 +162,18 @@ def finish(operation_id, user_id, state, actual, error, connection):
         if state == "succeeded":
             pair = s.get(Pair, op.pair_id)
             affected = [pair]
-            if op.kind in {"delete_document", "delete_paragraph"}:
+            if op.kind in {"delete_document", "delete_paragraph", "update_paragraph"}:
                 # Match each pair against its own run's snapshots. Paragraph IDs
                 # from other sources or historical associations are not sufficient.
                 identity_filters = [
                     ParagraphSnapshot.data[key].as_string() == op.target[key]
                     for key in ["workspace_id", "knowledge_id", "document_id"]
                 ]
-                if op.kind == "delete_paragraph":
+                if op.kind != "delete_document":
                     identity_filters.append(
                         ParagraphSnapshot.paragraph_id == op.target["paragraph_id"]
                     )
-                matches_deleted_target = (
+                matches_target = (
                     select(ParagraphSnapshot.id)
                     .where(
                         ParagraphSnapshot.run_id == Pair.run_id,
@@ -189,17 +189,22 @@ def finish(operation_id, user_id, state, actual, error, connection):
                     .join(Run, Run.id == Pair.run_id)
                     .where(
                         Run.config["source_id"].as_string() == op.target["source_id"],
-                        matches_deleted_target,
+                        matches_target,
                     )
                 ).all()
+            status = "source_changed" if op.kind == "update_paragraph" else "resolved"
+            note = (
+                "内容已变化，需重新扫描"
+                if status == "source_changed" else "源系统操作回读确认成功"
+            )
             for item in affected:
-                item.status = "resolved"
+                item.status = status
                 s.add(
                     Decision(
                         pair_id=item.id,
                         user_id=user_id,
-                        status="resolved",
-                        note=f"源系统操作回读确认成功；关联操作 {op.id}",
+                        status=status,
+                        note=f"{note}；关联操作 {op.id}",
                     )
                 )
         return op

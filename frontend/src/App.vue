@@ -87,6 +87,7 @@ const stateLabels: Row = {
   pending: "待处理",
   ignored: "已忽略",
   resolved: "已处理",
+  source_changed: "内容已变化，需重新扫描",
   unconfigured: "待配置接口",
   draft: "待提交",
   executing: "执行中",
@@ -905,7 +906,7 @@ onUnmounted(() => clearInterval(timer));
           <div class="filters">
             <el-select v-model="filter.status" placeholder="全部状态" clearable
               ><el-option
-                v-for="s in ['pending', 'ignored', 'resolved']"
+                v-for="s in ['pending', 'ignored', 'resolved', 'source_changed']"
                 :key="s"
                 :value="s"
                 :label="stateLabels[s]" /></el-select
@@ -969,7 +970,7 @@ onUnmounted(() => clearInterval(timer));
                 <el-tag>{{ stateLabels[pair.status] }}</el-tag
                 ><el-button
                   text
-                  :disabled="selectedRun.state !== 'succeeded'"
+                  :disabled="selectedRun.state !== 'succeeded' || pair.status === 'source_changed'"
                   @click="
                     review(
                       pair,
@@ -981,7 +982,7 @@ onUnmounted(() => clearInterval(timer));
                   }}</el-button
                 ><el-button
                   text
-                  :disabled="selectedRun.state !== 'succeeded'"
+                  :disabled="selectedRun.state !== 'succeeded' || pair.status === 'source_changed'"
                   @click="
                     review(
                       pair,

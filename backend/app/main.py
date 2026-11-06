@@ -709,6 +709,8 @@ def review(pair_id: str, body: ReviewBody, user=Depends(auth)):
         pair = get(s, Pair, pair_id)
         if get(s, Run, pair.run_id).state != "succeeded":
             raise HTTPException(409, "完整扫描成功后才能处理")
+        if pair.status == "source_changed":
+            raise HTTPException(409, "内容已变化，需重新扫描，不能更改旧结果的处理状态")
         pair.status = body.status
         s.add(
             Decision(
