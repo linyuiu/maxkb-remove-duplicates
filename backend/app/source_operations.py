@@ -153,16 +153,28 @@ def finish(operation_id, user_id, state, actual, error, connection):
             pair = s.get(Pair, op.pair_id)
             affected = [pair]
             if op.kind == "delete_document":
-                ids = select(ParagraphSnapshot.paragraph_id).where(
-                    ParagraphSnapshot.data["document_id"].as_string()
-                    == op.target["document_id"]
+                # Match each pair against its own run's snapshots. Paragraph IDs
+                # from other sources or historical associations are not sufficient.
+                belongs_to_document = (
+                    select(ParagraphSnapshot.id)
+                    .where(
+                        ParagraphSnapshot.run_id == Pair.run_id,
+                        (ParagraphSnapshot.paragraph_id == Pair.left_id)
+                        | (ParagraphSnapshot.paragraph_id == Pair.right_id),
+                        *(
+                            ParagraphSnapshot.data[key].as_string() == op.target[key]
+                            for key in ["workspace_id", "knowledge_id", "document_id"]
+                        ),
+                    )
+                    .correlate(Pair)
+                    .exists()
                 )
                 affected = s.scalars(
                     select(Pair)
                     .join(Run, Run.id == Pair.run_id)
                     .where(
                         Run.config["source_id"].as_string() == op.target["source_id"],
-                        Pair.left_id.in_(ids) | Pair.right_id.in_(ids),
+                        belongs_to_document,
                     )
                 ).all()
             for item in affected:
