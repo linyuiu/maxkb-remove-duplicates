@@ -51,9 +51,9 @@ def connection():
 
 @pytest.mark.parametrize("kind", [
     "delete_document",
-    pytest.param("delete_paragraph", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="Other pairs containing a deleted paragraph remain pending")),
+    "delete_paragraph",
 ])
-def test_document_deletion_matches_each_pairs_own_snapshot(connection, kind):
+def test_deletion_matches_each_pairs_own_snapshot(connection, kind):
     target = {
         "source_id": "source-a",
         "workspace_id": "default",
@@ -85,7 +85,7 @@ def test_document_deletion_matches_each_pairs_own_snapshot(connection, kind):
             session.add(Task(id=sid, name=sid, source_id=sid, knowledge_ids=[]))
         session.flush()
         for rid, sid in [
-            ("original", "source-a"), ("later", "source-a"),
+            ("original", "source-a"), ("later", "source-a"), ("another-run", "source-a"),
             ("other-source", "source-b"), ("other-knowledge", "source-a"),
             ("other-workspace", "source-a"),
         ]:
@@ -93,6 +93,7 @@ def test_document_deletion_matches_each_pairs_own_snapshot(connection, kind):
         session.flush()
         session.add_all([
             snapshot("original", "deleted-paragraph"),
+            snapshot("another-run", "deleted-paragraph"),
             snapshot("original", "another-deleted-paragraph"),
             snapshot("original", "foreign-paragraph", document_id="unrelated-document"),
             # This run associated the same paragraph ID with a different document.
@@ -105,6 +106,7 @@ def test_document_deletion_matches_each_pairs_own_snapshot(connection, kind):
         ])
         session.add_all([
             pair("target", "original", "deleted-paragraph"),
+            pair("same-paragraph-another-run", "another-run", "deleted-paragraph"),
             pair("shared-paragraph", "original", "peer", "deleted-paragraph"),
             pair("same-document-right", "original", "peer", "another-deleted-paragraph"),
             pair("unrelated", "original", "foreign-paragraph", status="ignored"),
@@ -126,6 +128,7 @@ def test_document_deletion_matches_each_pairs_own_snapshot(connection, kind):
     with Session(connection) as session:
         assert {row.id: row.status for row in session.scalars(select(Pair))} == {
             "target": "resolved", "shared-paragraph": "resolved",
+            "same-paragraph-another-run": "resolved",
             "same-document-right": "resolved" if kind == "delete_document" else "pending",
             "unrelated": "ignored", "moved-paragraph": "pending",
             "same-document-another-run": "resolved" if kind == "delete_document" else "pending", "different-source": "pending",
@@ -134,8 +137,11 @@ def test_document_deletion_matches_each_pairs_own_snapshot(connection, kind):
         operation = session.get(Operation, "operation")
         assert operation.state == "succeeded" and operation.actual is None
         assert operation.before["paragraphs"][0]["content"] == "original text"
-        decision = session.scalars(select(Decision)).one()
-        assert decision.pair_id == "target" and decision.status == "resolved"
+        decisions = session.scalars(select(Decision)).all()
+        resolved = set(session.scalars(select(Pair.id).where(Pair.status == "resolved")))
+        assert {decision.pair_id for decision in decisions} == resolved
+        assert len(decisions) == len(resolved)
+        assert all(decision.status == "resolved" and 'operation' in decision.note for decision in decisions)
 
 
 @pytest.mark.parametrize('scenario,kind,expected', [

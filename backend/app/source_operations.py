@@ -162,19 +162,24 @@ def finish(operation_id, user_id, state, actual, error, connection):
         if state == "succeeded":
             pair = s.get(Pair, op.pair_id)
             affected = [pair]
-            if op.kind == "delete_document":
+            if op.kind in {"delete_document", "delete_paragraph"}:
                 # Match each pair against its own run's snapshots. Paragraph IDs
                 # from other sources or historical associations are not sufficient.
-                belongs_to_document = (
+                identity_filters = [
+                    ParagraphSnapshot.data[key].as_string() == op.target[key]
+                    for key in ["workspace_id", "knowledge_id", "document_id"]
+                ]
+                if op.kind == "delete_paragraph":
+                    identity_filters.append(
+                        ParagraphSnapshot.paragraph_id == op.target["paragraph_id"]
+                    )
+                matches_deleted_target = (
                     select(ParagraphSnapshot.id)
                     .where(
                         ParagraphSnapshot.run_id == Pair.run_id,
                         (ParagraphSnapshot.paragraph_id == Pair.left_id)
                         | (ParagraphSnapshot.paragraph_id == Pair.right_id),
-                        *(
-                            ParagraphSnapshot.data[key].as_string() == op.target[key]
-                            for key in ["workspace_id", "knowledge_id", "document_id"]
-                        ),
+                        *identity_filters,
                     )
                     .correlate(Pair)
                     .exists()
@@ -184,18 +189,17 @@ def finish(operation_id, user_id, state, actual, error, connection):
                     .join(Run, Run.id == Pair.run_id)
                     .where(
                         Run.config["source_id"].as_string() == op.target["source_id"],
-                        belongs_to_document,
+                        matches_deleted_target,
                     )
                 ).all()
             for item in affected:
                 item.status = "resolved"
-
-            s.add(
-                Decision(
-                    pair_id=pair.id,
-                    user_id=user_id,
-                    status="resolved",
-                    note="源系统操作回读确认成功",
+                s.add(
+                    Decision(
+                        pair_id=item.id,
+                        user_id=user_id,
+                        status="resolved",
+                        note=f"源系统操作回读确认成功；关联操作 {op.id}",
+                    )
                 )
-            )
         return op
