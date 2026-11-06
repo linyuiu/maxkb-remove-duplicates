@@ -30,12 +30,13 @@ def oracle(rows, threshold, exclude_doc):
     return pairs
 
 
+@pytest.mark.parametrize("seed", [7, 42, 103])
 @pytest.mark.parametrize(
     "threshold,exclude_doc,batch_size",
     [(0, False, 1), (0.8, False, 3), (0.8, True, 2), (1, False, 4)],
 )
 def test_production_sql_matches_independent_all_pairs(
-    threshold, exclude_doc, batch_size
+    threshold, exclude_doc, batch_size, seed
 ):
     harness = Path(__file__).parent / "sql"
     if not (
@@ -44,7 +45,7 @@ def test_production_sql_matches_independent_all_pairs(
         pytest.skip(
             "Run npm ci --prefix tests/sql to install PostgreSQL WASM SQL test harness"
         )
-    rng = random.Random(42)
+    rng = random.Random(seed)
     rows = [
         dict(
             embedding_id="e" + str(i),

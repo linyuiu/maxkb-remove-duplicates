@@ -49,7 +49,11 @@ def connection():
         engine.dispose()
 
 
-def test_document_deletion_matches_each_pairs_own_snapshot(connection):
+@pytest.mark.parametrize("kind", [
+    "delete_document",
+    pytest.param("delete_paragraph", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason="Other pairs containing a deleted paragraph remain pending")),
+])
+def test_document_deletion_matches_each_pairs_own_snapshot(connection, kind):
     target = {
         "source_id": "source-a",
         "workspace_id": "default",
@@ -101,6 +105,7 @@ def test_document_deletion_matches_each_pairs_own_snapshot(connection):
         ])
         session.add_all([
             pair("target", "original", "deleted-paragraph"),
+            pair("shared-paragraph", "original", "peer", "deleted-paragraph"),
             pair("same-document-right", "original", "peer", "another-deleted-paragraph"),
             pair("unrelated", "original", "foreign-paragraph", status="ignored"),
             pair("moved-paragraph", "later", "deleted-paragraph"),
@@ -112,7 +117,7 @@ def test_document_deletion_matches_each_pairs_own_snapshot(connection):
         session.flush()
         session.add(Operation(
             id="operation", pair_id="target", user_id="user", target=target,
-            kind="delete_document", state="executing",
+            kind=kind, state="executing",
             before={"paragraphs": [{"id": "deleted-paragraph", "content": "original text"}]},
         ))
 
@@ -120,9 +125,10 @@ def test_document_deletion_matches_each_pairs_own_snapshot(connection):
 
     with Session(connection) as session:
         assert {row.id: row.status for row in session.scalars(select(Pair))} == {
-            "target": "resolved", "same-document-right": "resolved",
+            "target": "resolved", "shared-paragraph": "resolved",
+            "same-document-right": "resolved" if kind == "delete_document" else "pending",
             "unrelated": "ignored", "moved-paragraph": "pending",
-            "same-document-another-run": "resolved", "different-source": "pending",
+            "same-document-another-run": "resolved" if kind == "delete_document" else "pending", "different-source": "pending",
             "different-knowledge": "pending", "different-workspace": "pending",
         }
         operation = session.get(Operation, "operation")
@@ -130,3 +136,52 @@ def test_document_deletion_matches_each_pairs_own_snapshot(connection):
         assert operation.before["paragraphs"][0]["content"] == "original text"
         decision = session.scalars(select(Decision)).one()
         assert decision.pair_id == "target" and decision.status == "resolved"
+
+
+@pytest.mark.parametrize('scenario,kind,expected', [
+    ('normal','update_paragraph','succeeded'),
+    ('normal','delete_paragraph','succeeded'),
+    ('wrong_readback','update_paragraph','unknown'),
+    ('write_timeout','update_paragraph','unknown'),
+    pytest.param('read_timeout','update_paragraph','failed', marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason='Read failure before mutation is incorrectly recorded as unknown')),
+])
+def test_audit_operation_outcomes(connection, monkeypatch, scenario, kind, expected):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    import httpx
+    from cryptography.fernet import Fernet
+    from app import source_operations as ops
+    from app.security import encrypt, content_hash
+    from app.maxkb_api import MaxKBAPI
+
+    monkeypatch.setenv('ENCRYPTION_KEY', Fernet.generate_key().decode())
+    monkeypatch.setattr(ops.db, 'transaction', lambda: ops.atomic(connection))
+    monkeypatch.setattr(ops.db, 'engine', SimpleNamespace(connect=lambda: nullcontext(connection)))
+    target=dict(source_id='s',workspace_id='default',knowledge_id='k',document_id='d',paragraph_id='p')
+    old=dict(id='p',document_id='d',title='title',content='before')
+    rows=[old.copy()]
+    writes=[]
+    def handler(request):
+        if request.method=='GET':
+            if scenario=='read_timeout':raise httpx.ReadTimeout('test',request=request)
+            return httpx.Response(200,json={'code':200,'data':{'total':len(rows),'records':rows}})
+        writes.append(request.method)
+        if scenario=='write_timeout':raise httpx.ReadTimeout('test',request=request)
+        if scenario!='wrong_readback':
+            if kind=='delete_paragraph':rows.clear()
+            else:rows[0]['content']='after'
+        return httpx.Response(200,json={'code':200,'data':True})
+    monkeypatch.setattr(ops,'MaxKBAPI',lambda source: MaxKBAPI(source,transport=httpx.MockTransport(handler)))
+    with Session(connection) as s, s.begin():
+        s.add(User(id='u',username='audit',password_hash='unused'))
+        s.add(DataSource(id='s',name='audit',connection='unused',api_base_url='http://maxkb.example.com/admin/api',api_key=encrypt('test-key')));s.flush()
+        s.add(Task(id='t',name='audit',source_id='s',knowledge_ids=['k']));s.flush()
+        s.add(Run(id='r',task_id='t',config={'source_id':'s'},state='succeeded'));s.flush()
+        s.add(Pair(id='pair',run_id='r',left_id='p',right_id='q',left_embedding_id='e',right_embedding_id='f',similarity=1));s.flush()
+        s.add(Operation(id='op',pair_id='pair',user_id='u',target=target,kind=kind,state='draft',before={**target,**old,'content_hash':content_hash('title','before')},proposed={'title':'title','content':'after'} if kind=='update_paragraph' else None))
+    result=ops.execute_operation('op','u')
+    assert writes==([] if scenario=='read_timeout' else ['DELETE' if kind=='delete_paragraph' else 'PUT'])
+    assert result.state==expected
+    if expected=='succeeded':
+        assert result.before['content']=='before'
+        assert result.actual is None if kind=='delete_paragraph' else result.actual['content']=='after'
