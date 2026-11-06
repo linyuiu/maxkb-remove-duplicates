@@ -81,6 +81,6 @@ mkdir -p docker/images
 docker image save -o docker/images/images.tar maxkb-remove-duplicates:v1.0.0 postgres:16
 ```
 
-修改镜像版本时，同步修改配置模板的 `IMAGE_TAG`。
+镜像版本通过 `.env` 的 `_VERSION=v1.0.0` 配置；首次安装修改 `install/.env.example`，安装后修改服务目录中的 `.env`。版本需要与已加载的镜像标签一致。
 
 需求与设计见 [PLAN.md](PLAN.md)。

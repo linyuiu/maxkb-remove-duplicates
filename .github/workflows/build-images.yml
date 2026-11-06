@@ -116,7 +116,7 @@ jobs:
           template = root / 'install/.env.example'
           lines = template.read_text().splitlines()
           template.write_text('\n'.join(
-              'IMAGE_TAG=' + os.environ['IMAGE_TAG'] if line.startswith('IMAGE_TAG=') else line
+              '_VERSION=' + os.environ['IMAGE_TAG'] if line.startswith('_VERSION=') else line
               for line in lines
           ) + '\n')
           (root / 'BUILD.json').write_text(json.dumps({
