@@ -7,7 +7,7 @@
 在 [GitHub Actions](https://github.com/linyuiu/maxkb-remove-duplicates/actions/workflows/build-images.yml) 点击 **Run workflow**：
 
 - `architecture`：选择 `amd64`、`arm64` 或 `both`。
-- `image_tag`：镜像版本，默认 `latest`。
+- `image_tag`：镜像版本，默认 `v1.0.0`。
 
 构建完成后，从 **Artifacts** 下载对应架构的安装包。解压 ZIP，再解压其中的 `.tar.gz`，包内已包含应用、PostgreSQL 镜像和安装脚本。产物保留 14 天。
 
@@ -75,10 +75,10 @@ MaxKB API 地址示例：`http://maxkb.example.com:18080/admin/api`，请替换�
 在源码根目录执行，架构与目标服务器保持一致：
 
 ```bash
-docker build -f docker/Dockerfile -t maxkb-remove-duplicates:latest .
+docker build -f docker/Dockerfile -t maxkb-remove-duplicates:v1.0.0 .
 docker pull postgres:16
 mkdir -p docker/images
-docker image save -o docker/images/images.tar maxkb-remove-duplicates:latest postgres:16
+docker image save -o docker/images/images.tar maxkb-remove-duplicates:v1.0.0 postgres:16
 ```
 
 修改镜像版本时，同步修改配置模板的 `IMAGE_TAG`。

@@ -17,7 +17,7 @@ on:
         description: Application image tag
         type: string
         required: true
-        default: latest
+        default: v1.0.0
 
 permissions:
   contents: read
@@ -114,7 +114,11 @@ jobs:
           from pathlib import Path
           root = Path(os.environ['PACKAGE_DIRECTORY'])
           template = root / 'install/.env.example'
-          template.write_text(template.read_text().replace('IMAGE_TAG=latest', 'IMAGE_TAG=' + os.environ['IMAGE_TAG']))
+          lines = template.read_text().splitlines()
+          template.write_text('\n'.join(
+              'IMAGE_TAG=' + os.environ['IMAGE_TAG'] if line.startswith('IMAGE_TAG=') else line
+              for line in lines
+          ) + '\n')
           (root / 'BUILD.json').write_text(json.dumps({
               'architecture': os.environ['TARGET_ARCH'],
               'image_tag': os.environ['IMAGE_TAG'],

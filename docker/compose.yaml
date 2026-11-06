@@ -21,7 +21,7 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
   app:
-    image: maxkb-remove-duplicates:${IMAGE_TAG:-latest}
+    image: maxkb-remove-duplicates:${IMAGE_TAG:-v1.0.0}
     pull_policy: never
     env_file: ./.env
     environment:
