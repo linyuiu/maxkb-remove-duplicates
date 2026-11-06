@@ -552,25 +552,51 @@ class Store(ImportStore, QueueStore, LineageStore, KnowledgeStore, TaskStopStore
 
     def save_paragraphs(self, file_id: str, documents: list[dict], *, auto_import: bool = False):
         with self.connect() as db:
-            db.execute("SELECT pg_advisory_xact_lock(762190317)")
-            db.execute("DELETE FROM paragraphs WHERE file_id=?", (file_id,))
-            index = 0
+            # Stage the expensive writes before acquiring the shared task lock.
+            # Temporary rows and publication are in one transaction: any failure
+            # preserves the previous paragraphs, status and events.
+            db.execute(
+                "CREATE TEMP TABLE ingestion_paragraph_stage "
+                "(LIKE paragraphs) ON COMMIT DROP"
+            )
+            batch, batch_bytes, index = [], 0, 0
+
+            def flush():
+                if batch:
+                    db.execute(
+                        "INSERT INTO ingestion_paragraph_stage "
+                        "(file_id,position,document_name,title,content) VALUES "
+                        + ",".join("(?,?,?,?,?)" for _ in batch),
+                        [value for row in batch for value in row],
+                    )
+                    batch.clear()
+
             for document in documents:
                 for paragraph in document["paragraphs"]:
-                    db.execute(
-                        "INSERT INTO paragraphs VALUES (?,?,?,?,?)",
-                        (
-                            file_id,
-                            index,
-                            document["name"],
-                            paragraph.get("title", ""),
-                            paragraph["content"],
-                        ),
-                    )
+                    row = (file_id, index, document["name"],
+                           paragraph.get("title", ""), paragraph["content"])
+                    row_bytes = sum(len(value.encode("utf-8")) for value in row if isinstance(value, str))
+                    if batch and (len(batch) >= 500 or batch_bytes + row_bytes > 1024 * 1024):
+                        flush()
+                        batch_bytes = 0
+                    batch.append(row)
+                    batch_bytes += row_bytes
                     index += 1
+            flush()
+            db.execute("SELECT pg_advisory_xact_lock(762190317)")
             row = db.execute(
-                "SELECT reimport_requested,kind FROM files WHERE id=?", (file_id,)
+                "SELECT reimport_requested,kind,stop_requested,status FROM files WHERE id=?", (file_id,)
             ).fetchone()
+            if row is None:
+                raise KeyError(file_id)
+            # Stop may have arrived while staging; never revive a stopped file.
+            if row["stop_requested"] or row["status"] == "stopped":
+                return
+            db.execute("DELETE FROM paragraphs WHERE file_id=?", (file_id,))
+            db.execute(
+                "INSERT INTO paragraphs (file_id,position,document_name,title,content) "
+                "SELECT file_id,position,document_name,title,content FROM ingestion_paragraph_stage"
+            )
             automatic = auto_import or bool(row[0])
             db.execute(
                 "UPDATE files SET status=?,message=?,error='',document_count=?,paragraph_count=?,"
