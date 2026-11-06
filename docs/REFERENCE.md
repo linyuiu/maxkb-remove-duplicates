@@ -1,0 +1,170 @@
+# 技术与开发说明
+
+安装及日常操作见 [README](../README.md)，需求与设计见 [PLAN](../PLAN.md)。
+
+## MaxKB 管理接口
+
+在“数据源 → 编辑”中配置 API 地址和 Bearer Key。地址可填 `http://maxkb.example.com:18080` 或完整的 `http://maxkb.example.com:18080/admin/api`。Key 可以包含或不包含 `Bearer ` 前缀；后端统一发送 `Authorization: Bearer <key>`。
+
+Key 使用系统 ENCRYPTION_KEY 加密保存，不返回前端。编辑时留空保留原 Key；更换 API 地址必须重新填写 Key，避免凭证发送给新的地址。数据库扫描仍完全只读，不调用这些写接口。
+
+已接入：
+
+- GET `/workspace/{workspace_id}/knowledge/{knowledge_id}/document/{document_id}/paragraph/{page}/30`：按 `data.total`、`data.records` 读取全部分页，提供整篇文档查看，并按段落 ID 找到当前文本。
+- PUT `/workspace/{workspace_id}/knowledge/{knowledge_id}/document/{document_id}/paragraph/{paragraph_id}`：提交 `{title, content}`。
+- DELETE 同一段落路径：删除单个段落。
+
+整篇文档 DELETE `/workspace/{workspace_id}/knowledge/{knowledge_id}/document/{document_id}` 已接入。只携带 Bearer 认证，不发送 Vue Ref 的 `dep`、`__v_isRef` 等字段；本地 MaxKB 代码确认这些参数未被读取。成功响应要求 `code=200` 且 `data=true`。所有接口同时检查 HTTP 状态和业务 `code=200`。
+
+操作流程：读取 API 最新文本 → 用户编辑/确认删除 → 保存 before/proposed 和待提交记录 → 校验当前内容哈希 → 持久化 executing → 调用源接口 → GET 回读确认 → 保存 actual 和最终状态。文档级数据库锁避免整篇文档删除与本系统其他段落操作冲突。源接口未提供 ETag/条件更新能力，因此无法完全消除其他系统在最后一次检查和写入之间并发编辑的竞态。
+
+超时、连接中断、回读不符标为“待核实”，不自动重发 PUT/DELETE。操作历史的“核实结果”只执行 GET，核对期望状态；重复提交同一成功操作不会再次写源系统。进程中断留下 executing 记录时，同样用核实入口处理。
+
+API 未配置时可通过只读数据库查看当前段落并保留草稿，不能执行源系统写入。修改前/拟修改后/回读实际文本独立保存；段落删除保存删除前正文；整篇文档删除先展示并保存全部分页段落及全文哈希，提交前重新读取全文比较，任一段落增删、顺序或文本变化均需重新核对。文档删除后通过只读 MaxKB 数据库确认文档已不存在，确认后 actual 为空；确认失败标为待核实，不重发 DELETE。成功删除整篇文档后，该数据源下涉及该文档的相似结果标记已处理。历史扫描快照始终保留。
+
+## 相似算法和数据一致性
+
+- 相似度直接在 MaxKB 源数据库的 embedding 表中计算，复用源库已有 pgvector；本系统使用普通 PostgreSQL，不保存或复制向量，也不安装 pgvector。
+- 数据范围由任务选择的 knowledge_id 集合决定，两侧均过滤该集合及 source_type='1'。两侧 knowledge_id 不必相等，始终排除同一 paragraph，可排除同一文档。
+- 一次运行保持一个只读 REPEATABLE READ 源事务。模型校验、向量维度/非零校验、段落快照提取和全部比较使用同一个连接、同一个数据快照。
+- 校验只从源库读取 vector_dims 和 vector_norm，不传输向量本体。遇到模型不兼容、维度不一致、零向量、断裂关联时明确失败。
+- 在源库分批遍历 embedding.id，每个锚点与范围内 ID 更小的所有正文向量比较。每对 chunk 只比较一次。LIMIT 仅控制每批锚点数量，不截断匹配候选。
+- 计算 `1 - (a.embedding <=> b.embedding)`，按实际浮点分数 `>= threshold` 筛选；没有 ANN 或 Top-K 截断。精确比较仍为 O(N²)。建议安排在每天 00:00 等空闲时段。
+- 按无序 paragraph 对去重，取所有 chunk 配对的最高相似度，记录对应 embedding ID，不进行传递合并。
+- 相似结果流式写入本系统，事务内 UPSERT 最大分；每次提交校验 后台扫描租约及令牌。扫描成功后才开放人工处理，部分结果明确标识为未完成。
+- 源事务断开后不能恢复原快照。因此失败/取消后的“重新扫描”创建新运行，旧参数、部分结果和快照保留，不混用新旧快照。后台扫描租约失效时也按此规则重新执行。
+- 默认心跳 15 秒、租约 180 秒、源库每条扫描 SQL 超时 120 秒；批次大小可配置。取消在当前 SQL 返回后的提交边界生效。
+- 同任务至多一个排队/执行中的运行，重叠定时触发跳过。午夜仅是新任务 Cron 的默认填写值，启用开关默认关闭，不会自动启动定时任务。
+- 后续扫描结果、原文快照和修改前后文本持续保留。本次调整按全新部署处理，不提供旧版向量暂存数据迁移。
+
+## 本地开发与 .env
+
+本系统仅需要普通 PostgreSQL；MaxKB 源库沿用其已有 pgvector 扩展。不要把本系统连接指向 MaxKB 数据库。
+
+API 启动时自动创建缺失的系统数据库、执行迁移并初始化管理员；已有管理员密码不会被覆盖。多进程启动通过数据库锁串行初始化。若数据库不存在，DB_USER 需要 CREATEDB 权限；数据库已存在时只需建表权限。无需手动执行迁移或 bootstrap。
+
+部署配置位于 `WORK_DIR/maxkb-remove-duplicates/.env`。容器通过 Compose 注入；源码运行时可用 `APP_ENV_FILE` 指定该文件，不指定时兼容读取项目根目录原有 `.env`。系统环境变量优先于文件。
+
+首次可执行 `bash install/install.sh --init-env` 从 `install/.env.example` 生成工作目录中的配置，再按运行环境编辑实际 `.env`。`.env` 已被 Git 忽略；已有配置继续使用，不重新生成密钥。
+
+| 配置 | 说明 |
+| --- | --- |
+| DB_HOST / DB_PORT | 本系统数据库地址、端口，Docker 模板为 postgres:5432；源码运行填写实际地址 |
+| DB_NAME / DB_USER / DB_PASSWORD | 本系统数据库名、用户、密码 |
+| DB_SSLMODE | PostgreSQL SSL 模式，默认 prefer |
+| ENCRYPTION_KEY | 数据源凭证加密密钥 |
+| ADMIN_USERNAME / ADMIN_PASSWORD | 首次创建的管理员账号 |
+| ALLOWED_ORIGINS / COOKIE_SECURE | 前端来源和会话 Cookie 设置 |
+| WEB_PORT | Compose Web 端口 |
+| IMAGE_TAG | 应用镜像版本标签，默认 latest |
+| WORK_DIR | 模板指定的工作目录 |
+| INSTALL_DIR | 脚本生成的绝对应用目录，包含 .env 和持久数据 |
+| APP_ENV_FILE | 源码运行时实际 .env 路径，可选 |
+| SOURCE_DIR | 源码运行时扫描的文档目录；Compose 内固定为 /sources |
+
+需要时也可用环境变量 `DATABASE_URL` 覆盖分项数据库配置；通常填写 `DB_*` 即可，密码里的特殊字符无需自行 URL 编码。
+
+源码开发时自行准备可连接的 PostgreSQL，并将 `.env` 的 `DB_HOST` 改为实际地址（例如 `127.0.0.1`），`DB_PORT` 改为该实例端口。模板中的 `postgres` 是容器内部服务名，不能直接用于宿主机源码进程。Compose 数据库默认不发布宿主机端口。
+
+```bash
+cd /path/to/example/maxkb-remove-duplicates
+# 只生成配置，不需要 Docker；已有 .env 保留
+bash install/install.sh --init-env
+# 默认工作目录；自定义时改为实际路径，并编辑此文件的数据库地址及端口
+export APP_ENV_FILE="$(pwd)/work/maxkb-remove-duplicates/.env"
+cd backend
+uv sync --group dev
+uv run uvicorn app.main:app --reload
+```
+
+后端这一个命令已经包含扫描队列和定时调度，无需再开终端启动 worker 或 scheduler。数据库迁移和管理员初始化在后台线程启动前完成。
+
+开发时 `--reload` 会随代码变化重启整个后端，正在扫描的源快照会丢失。后端关闭时停止领取任务、取消正在执行的源查询并释放租约；下次启动为中断的扫描创建新运行重扫，保留原来的部分结果。强制终止或数据库不可达时，等待租约过期后恢复。
+
+长期运行建议去掉 `--reload`，使用 `uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1`。扫描在独立线程执行，不阻塞 Web 事件循环；各线程使用各自数据库连接。持久化队列、运行租约及定时去重仍保留。
+
+更改 `.env` 后重启后端。Compose 配置变更后，进入 `WORK_DIR/maxkb-remove-duplicates`，使用 `docker compose up -d --force-recreate --remove-orphans` 重新注入配置并清理旧后台服务容器。
+
+前端：
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+访问 http://localhost:5173 。Vite 将 `/api` 代理到本机 8000 端口。API 文档为后端 `/docs`（Compose 下默认不公开）。
+
+## 开发检查
+
+```bash
+cd backend
+npm ci --prefix tests/sql
+uv run pytest -q
+cd ../frontend
+npm run build
+```
+
+SQL 测试用 PGlite 的 PostgreSQL/pgvector 执行生产比较 SQL，与独立 Python 全量余弦计算结果核对，覆盖分批、同段落排除、同文档选项、阈值和最大值聚合、选定知识库范围过滤及问题向量排除。不依赖外部 MaxKB，也不会连接生产数据库。未安装测试运行时会明确跳过这部分测试。
+
+另有一次性数据库生命周期检查，验证本系统无需 vector 扩展、源库直接计算、失败后新运行重试、租约隔离及草稿前后文本留存：
+
+```bash
+# backend 目录，终端一；两个仅用于测试的内存数据库，占用 15438/15439
+node tests/sql/serve.mjs
+# 终端二
+DEDUP_DISPOSABLE_TEST_DB=1 uv run pytest -q
+```
+
+每次执行生命周期检查前重启临时数据库服务。测试不连接真实 MaxKB。结束后 Ctrl+C 关闭临时服务。
+
+数据表首次建表 SQL：`backend/migrations/versions/initial_schema.sql`。迁移使用已冻结 SQL，后续调整必须新增 Alembic revision。
+
+## 扫描前预估
+
+手动新扫描、失败后重新扫描均先统计所选知识库的正文 chunk、段落和文档数量，展示知识库名称与向量维度，再计算不同段落之间需要比较的 chunk 对数。排除同文档时按文档分组扣除。统计只做聚合，不进行相似度两两比较。
+
+用户取消不创建运行；确认后才排队。预估有效期 10 分钟，与用户、任务配置绑定；任务配置变化或预估过期需要重新统计。同一预估重复确认只返回原运行，不重复启动。数量统计与正式扫描不是同一快照，期间数据变化会使实际工作量和耗时变化。
+
+预计耗时显示区间，不含排队时间。优先参考同数据源、同维度、同批次/阈值/排除规则的成功运行速度（剔除过短小样本），取中位数；旧版没有实际开始时间的运行不参与。暂无历史时使用未校准经验速率，界面明确标注，给出较宽区间。首次经验值可在 `.env` 设置 `SCAN_ESTIMATE_COMPARISONS_PER_SECOND=50000`（768 维参考比较数/秒），按维度调整；不能视为性能承诺。
+
+定时任务仍按已启用的规则自动运行，无需届时人工确认。自动重试沿用之前已授权的扫描范围。
+
+启用或修改启用中的定时任务，保存前同样统计当前表单指定范围并展示预计耗时、Cron、时区和下次执行时间；确认后才写入任务配置，不立即执行扫描。取消不创建或修改任务。确认有效 10 分钟，并绑定完整表单、当前用户和任务标识；修改配置需重新预估。暂停定时任务无需等待统计，可直接保存。
+
+
+## 知识入库
+
+启动命令与以前相同，无需独立入库服务或额外数据库。后端启动自动执行 `0004`，创建 PostgreSQL 的 `ingestion` schema。左侧功能下拉切换“知识入库”，打开“入库设置”配置 MinerU、MaxKB API、工作空间和切分/导入参数。
+
+也可在“重复片段 → 数据源”保存公共 MaxKB API 连接，入库顶部选择该连接并点击“应用连接”。仅做入库时数据库主机可留空；重复扫描任务只列出配置了数据库的连接。已有队列保存自己的配置快照，应用连接只影响后续新任务。
+
+“文档入库”支持 PDF、Word、Excel 及文件夹任务，确认知识库匹配/创建和标签后处理。需要人工检查时保持关闭自动入库，处理后预览切分，再手动确认入库。PDF 使用 MinerU，Word、Excel 延续原项目的原生处理路径。文件同步页面支持服务器映射目录及 SSH 来源。原项目不需要启动，其 SQLite 数据不会导入。
+
+本地开发文件默认保存在项目 `data/ingestion/`。可在源码运行实际读取的 `.env` 配置：
+
+```dotenv
+INGESTION_DATA_DIR=/absolute/path/to/persistent/ingestion
+SOURCE_DIR=/absolute/path/to/documents
+PARSE_WORKERS=1
+SPLIT_WORKERS=2
+IMPORT_WORKERS=5
+```
+
+Compose 将入库文件持久化到 `INSTALL_DIR/ingestion`，文档映射目录为 `INSTALL_DIR/documents`；工作目录的 `compose.yaml` 已包含读写挂载，目录归档操作需要写权限。`SOURCE_DIR` 是后端或容器可见的路径。默认每个文件上限 200MB、单次请求 20480MB，可通过实际 `.env` 中的 `MAX_*` 调整，由 FastAPI 的上传大小限制直接控制。
+
+备份需同时保存 PostgreSQL、工作目录下的入库文件及实际 `.env` 的 `ENCRYPTION_KEY`。数据库不能替代原文件和解析文件备份。入库队列与远端回执持久化，服务重启会恢复可继续的任务；创建结果不明确时需要先核对，避免重复创建。
+
+### 入库适配回归
+
+`backend/tests/ingestion` 从原项目业务回归迁入，使用模拟上游接口与隔离 PostgreSQL schema。不会上传到真实 MaxKB。临时数据库准备方式沿用 `backend/tests/sql/serve.mjs`：
+
+```bash
+cd backend/tests/sql
+npm ci
+node serve.mjs
+# 另一终端，在 backend 目录执行：
+INGESTION_PG_TEST_DB=1 uv run pytest tests/ingestion -q
+```
+
+普通后端检查为 `uv run pytest -q`；需要临时数据库的检查默认跳过。临时数据库仅监听 15438/15439，不使用 `.env` 的业务数据库。不要同时运行不同进程的临时数据库回归：PGlite socket 服务仅适合单客户端连接。主系统生命周期检查使用 `DEDUP_DISPOSABLE_TEST_DB=1 uv run pytest tests/test_lifecycle.py -q`，应在重启临时数据库后单独运行。
