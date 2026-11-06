@@ -52,7 +52,7 @@ MARKDOWN = MarkdownIt("commonmark", {"html": True}).enable("table")
 
 class ConfigInput(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-    mineru_url: str = Field(default="http://192.168.8.60:8000", min_length=1, max_length=2048)
+    mineru_url: str = Field(default="http://mineru.example.com:8000", min_length=1, max_length=2048)
     maxkb_base_url: str = Field(min_length=1, max_length=2048)
     workspace_id: str = Field(min_length=1, max_length=200)
     # Retained for legacy API clients; new browser tasks resolve IDs from their plan.

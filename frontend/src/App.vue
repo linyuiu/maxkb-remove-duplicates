@@ -167,7 +167,7 @@ function openSource(row?: Row) {
   sourceForm.value = row
     ? { ...row, password: "", api_key: "", port: Number(row.port) }
     : {
-        api_base_url: "http://192.168.8.60:18080/admin/api",
+        api_base_url: "http://maxkb.example.com:18080/admin/api",
         api_key: "",
         name: "",
         host: "",
@@ -1296,7 +1296,7 @@ onUnmounted(() => clearInterval(timer));
       <el-form-item label="API 地址"
         ><el-input
           v-model="sourceForm.api_base_url"
-          placeholder="http://192.168.8.60:18080/admin/api"
+          placeholder="http://maxkb.example.com:18080/admin/api"
       /></el-form-item>
       <el-form-item
         :label="

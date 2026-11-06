@@ -1,6 +1,6 @@
 # MaxKB 相似片段治理系统
 
-项目根目录：`/Users/linyu/ai/fit2cloud/maxkb-remove-duplicates`。
+项目根目录：`/path/to/example/maxkb-remove-duplicates`。
 
 ## 已确认范围
 - 独立前后端、独立登录；Python / FastAPI 后端，uv 管理依赖；Vue 3 / TypeScript / Element Plus 前端。
@@ -67,7 +67,7 @@ API 启动自动建库（缺失时）、迁移并初始化管理员，数据库�
 
 ## 知识入库整合
 
-已将 `/Users/linyu/ai/mu_batch_to_mk/web` 的业务实现复制到本项目后独立适配，原项目保持不变。以空白入库模块初始化，不读取或迁移旧 SQLite。
+已将 `/path/to/example/mu_batch_to_mk/web` 的业务实现复制到本项目后独立适配，原项目保持不变。以空白入库模块初始化，不读取或迁移旧 SQLite。
 
 - 共用登录、会话、`.env`、PostgreSQL 和一个 API 进程。侧栏切换“知识入库 / 重复片段”；入库页面包括文档入库、文件同步、入库历史和入库设置。白底深色文字，沿用当前侧栏布局。
 - 入库接口统一为 `/api/ingestion/*`，继承登录、来源校验与上传大小限制。公共 MaxKB 连接可只配置 API，也可同时配置数据库；只有具备数据库连接的数据源能被扫描任务选择。复用 API 连接时由后端解密，不把 Key 返回浏览器。

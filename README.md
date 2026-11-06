@@ -176,7 +176,7 @@ docker compose up -d --force-recreate
 
 ## MaxKB 管理接口
 
-在“数据源 → 编辑”中配置 API 地址和 Bearer Key。地址可填 `http://192.168.8.60:18080` 或完整的 `http://192.168.8.60:18080/admin/api`。Key 可以包含或不包含 `Bearer ` 前缀；后端统一发送 `Authorization: Bearer <key>`。
+在“数据源 → 编辑”中配置 API 地址和 Bearer Key。地址可填 `http://maxkb.example.com:18080` 或完整的 `http://maxkb.example.com:18080/admin/api`。Key 可以包含或不包含 `Bearer ` 前缀；后端统一发送 `Authorization: Bearer <key>`。
 
 Key 使用系统 ENCRYPTION_KEY 加密保存，不返回前端。编辑时留空保留原 Key；更换 API 地址必须重新填写 Key，避免凭证发送给新的地址。数据库扫描仍完全只读，不调用这些写接口。
 
@@ -239,7 +239,7 @@ API 启动时自动创建缺失的系统数据库、执行迁移并初始化管�
 源码开发时自行准备可连接的 PostgreSQL，并将 `.env` 的 `DB_HOST` 改为实际地址（例如 `127.0.0.1`），`DB_PORT` 改为该实例端口。模板中的 `postgres` 是容器内部服务名，不能直接用于宿主机源码进程。Compose 数据库默认不发布宿主机端口。
 
 ```bash
-cd /Users/linyu/ai/fit2cloud/maxkb-remove-duplicates
+cd /path/to/example/maxkb-remove-duplicates
 # 只生成配置，不需要 Docker；已有 .env 保留
 bash install/install.sh --init-env
 # 默认工作目录；自定义时改为实际路径，并编辑此文件的数据库地址及端口

@@ -28,12 +28,12 @@
       <div class="card-heading"><div><h2>连接与参数</h2></div><span id="config-state" class="badge">未配置</span></div>
       <form id="settings-form">
         <fieldset><legend><span class="service-dot mineru"></span>MinerU 解析服务</legend>
-          <label>服务地址<input name="mineru_url" type="url" required placeholder="http://服务器IP:8000"><small>填写服务根地址，无需加 /v1。</small></label>
+          <label>服务地址<input name="mineru_url" type="url" required placeholder="http://mineru.example.com:8000"><small>填写服务根地址，无需加 /v1。</small></label>
           <label>API Key <span class="optional">可选</span><input name="mineru_key" type="password" autocomplete="off" placeholder="未启用鉴权时留空"><small id="mineru-key-help">仅在 MinerU 启用鉴权时填写。</small></label>
           <div class="field-row"><label>解析档位<select name="tier"><option value="flash">flash</option><option value="basic">basic</option><option value="standard">standard</option><option value="advanced">advanced</option></select><small>需与服务支持的档位一致。</small></label><label>页码范围 <span class="optional">可选</span><input name="page_range" placeholder="如 1-5,8"><small>留空解析全部页面。</small></label></div>
         </fieldset>
         <fieldset><legend><span class="service-dot maxkb"></span>MaxKB 知识库</legend>
-          <label>API 根地址<input name="maxkb_base_url" type="url" required placeholder="https://域名/admin/api"><small>工作空间与知识库 ID 分别填写在下方。</small></label>
+          <label>API 根地址<input name="maxkb_base_url" type="url" required placeholder="http://maxkb.example.com:18080/admin/api"><small>工作空间与知识库 ID 分别填写在下方。</small></label>
           <label>访问令牌<input name="maxkb_token" type="password" autocomplete="off" placeholder="填写 MaxKB 令牌"><small id="token-help">凭据仅保存在服务端，不会返回到浏览器。</small></label>
           <label>工作空间 ID<input name="workspace_id" required placeholder="default"><small>例如 default，也可填写其他工作空间 ID。</small></label>
         </fieldset>
@@ -71,7 +71,7 @@
           <form id="ssh-form" class="source-form">
             <label>服务器配置<select id="ssh-config"><option value="">新增服务器</option></select></label>
             <label>配置名称<input name="name" required maxlength="100" placeholder="例如：研发文档服务器"></label>
-            <div class="field-row"><label>服务器地址<input name="host" required placeholder="IP 或主机名"><small>填写文件所在服务器，不需要 http://。</small></label><label>SSH 端口<input name="port" type="number" value="22" min="1" max="65535" required></label></div>
+            <div class="field-row"><label>服务器地址<input name="host" required placeholder="ssh.example.com"><small>填写文件所在服务器，不需要 http://。</small></label><label>SSH 端口<input name="port" type="number" value="22" min="1" max="65535" required></label></div>
             <label>SSH 用户<input name="username" required placeholder="具有文档目录读写权限的用户"></label>
             <label>远程源目录<input name="remote_path" required placeholder="/data/documents"><small>填写原始文档根目录的绝对路径，递归同步 PDF、Word、Excel；自动跳过“已处理文档”。</small></label>
             <label>认证方式<select name="auth"><option value="password">用户名和密码</option><option value="key">SSH 私钥</option></select></label>

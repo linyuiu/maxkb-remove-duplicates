@@ -20,8 +20,8 @@ from .queues import QueueStore
 from .task_stop import TaskStopStore
 
 DEFAULT_CONFIG = {
-    "mineru_url": "http://192.168.8.60:8000",
-    "maxkb_base_url": "https://mk-ee.fit2cloud.cn/admin/api",
+    "mineru_url": "http://mineru.example.com:8000",
+    "maxkb_base_url": "http://maxkb.example.com:18080/admin/api",
     "workspace_id": "default",
     "knowledge_id": "pending",
     "maxkb_token": "",
