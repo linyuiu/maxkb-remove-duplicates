@@ -25,3 +25,6 @@ work/
 !install/.env.example
 .idea/
 *.log
+
+# Local documentation is kept on this machine only.
+/docs/
