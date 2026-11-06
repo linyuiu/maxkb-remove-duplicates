@@ -83,7 +83,10 @@ class MaxKBAPI:
             raise APIError("源系统返回格式异常", uncertain=mutation) from None
 
     def document(self, target):
-        records, seen = [], set()
+        return [row for page in self.pages(target) for row in page]
+
+    def pages(self, target):
+        seen = set()
         page = 1
         total = None
         while page <= 10000:
@@ -98,7 +101,8 @@ class MaxKBAPI:
                 total = data["total"]
             if data["total"] != total:
                 raise APIError("读取期间文档段落数量变化，请刷新重试")
-            for row in data["records"]:
+            records = data["records"]
+            for row in records:
                 if (
                     not isinstance(row, dict)
                     or not row.get("id")
@@ -111,17 +115,18 @@ class MaxKBAPI:
                 ):
                     raise APIError("源段落文本格式异常")
                 seen.add(row["id"])
-                records.append(row)
-            if len(records) == total:
-                return records
-            if not data["records"] or len(records) > total:
+            if len(seen) > total or (not records and len(seen) != total):
                 raise APIError("文档分页不完整，请刷新重试")
+            yield records
+            if len(seen) == total:
+                return
             page += 1
         raise APIError("文档分页超出读取上限")
 
     def current(self, target):
         row = next(
-            (r for r in self.document(target) if r["id"] == target["paragraph_id"]),
+            (r for page in self.pages(target) for r in page
+             if r["id"] == target["paragraph_id"]),
             None,
         )
         if row is None:

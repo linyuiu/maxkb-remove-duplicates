@@ -24,7 +24,7 @@ from .models import (
     now,
     ScanEstimate,
 )
-from .security import passwords, digest, encrypt, decrypt, cipher
+from .security import passwords, digest, encrypt, decrypt, cipher, content_hash
 from .source import (
     list_knowledge,
     validated_ids,
@@ -870,7 +870,10 @@ def document_content(pair_id: str, side: str, s=Depends(db), user=Depends(auth))
                 **target,
                 "document_hash": document_hash(records),
                 "document_name": target["document_name"],
-                "records": records,
+                "records": [
+                    {**row, "content_hash": content_hash(row.get("title", ""), row["content"])}
+                    for row in records
+                ],
             }
     except APIError as exc:
         raise HTTPException(400, str(exc))

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, defineAsyncComponent, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { PreviewCache } from "./previewCache";
+const previewCache = new PreviewCache();
 const KnowledgeIngestion=defineAsyncComponent(()=>import("./components/KnowledgeIngestion.vue"));
 type Row = Record<string, any>;
 const user = ref(""),
@@ -109,6 +111,7 @@ const sourceName = (id: string) =>
 const date = (v: string) =>
   v ? new Date(v).toLocaleString("zh-CN", { hour12: false }) : "—";
 async function api(path: string, options: RequestInit = {}) {
+  if (options.method && options.method !== "GET") previewCache.clear();
   const res = await fetch("/api" + path, {
     credentials: "include",
     ...options,
@@ -120,6 +123,7 @@ async function api(path: string, options: RequestInit = {}) {
   });
   const data = await res.json();
   if (!res.ok) {
+    previewCache.clear();
     if (res.status === 401) user.value = "";
     throw new Error(
       typeof data.detail === "string"
@@ -382,10 +386,41 @@ async function review(pair: Row, status: string) {
     await loadPairs();
   });
 }
-async function edit(pair: Row, side: string, kind = "update_paragraph") {
+function previewKey(pair: Row, side: string) {
+  const target = pair[side];
+  return JSON.stringify([selectedRun.value?.config.source_id, target.workspace_id,
+    target.knowledge_id, target.document_id]);
+}
+async function readDocument(pair: Row, side: string) {
+  const key = previewKey(pair, side);
+  const cached = previewCache.get(key);
+  if (cached) return cached;
+  const doc = await api("/pairs/" + pair.id + "/document/" + side);
+  previewCache.set(key, doc);
+  return doc;
+}
+async function readParagraph(pair: Row, side: string, force = false) {
+  const target = pair[side];
+  const key = previewKey(pair, side);
+  const paragraphKey = key + ":" + target.paragraph_id;
+  if (force) previewCache.clear();
+  let result = previewCache.get(paragraphKey);
+  if (!result) {
+    const doc = previewCache.get(key);
+    if (doc) {
+      const row = doc.records.find((r: Row) => r.id === target.paragraph_id);
+      result = {api_configured: true, current: row ? {...target, ...row} : null};
+    } else {
+      result = await api("/pairs/" + pair.id + "/current/" + side);
+    }
+    previewCache.set(paragraphKey, result);
+  }
+  return {...result, changed: !result.current || result.current.content_hash !== target.content_hash};
+}
+async function edit(pair: Row, side: string, kind = "update_paragraph", force = false) {
   await action(async () => {
     if (kind === "delete_document") {
-      const doc = await api("/pairs/" + pair.id + "/document/" + side);
+      const doc = await readDocument(pair, side);
       editTarget.value = {
         pair,
         side,
@@ -404,7 +439,7 @@ async function edit(pair: Row, side: string, kind = "update_paragraph") {
       editOpen.value = true;
       return;
     }
-    const result = await api("/pairs/" + pair.id + "/current/" + side);
+    const result = await readParagraph(pair, side, force);
     live.value = result.current;
     if (!live.value) throw new Error("该段落已从源系统删除");
     editTarget.value = {
@@ -444,8 +479,14 @@ async function saveDraft() {
     editOpen.value = false;
     if (operation.state === "draft") {
       const result = await post("/operations/" + operation.id + "/execute");
-      if (result.state === "succeeded")
+      if (result.state === "succeeded") {
+        if (editTarget.value.kind === "update_paragraph") {
+          const key = previewKey(editTarget.value.pair, editTarget.value.side);
+          previewCache.set(key + ":" + result.target.paragraph_id,
+            {api_configured: true, current: result.actual});
+        }
         ElMessage.success("源系统操作已回读确认，前后文本已保存");
+      }
       else ElMessage.warning(result.error || stateLabels[result.state]);
       await loadPairs();
     } else ElMessage.success("接口未配置，已保存草稿");
@@ -453,7 +494,7 @@ async function saveDraft() {
 }
 async function viewDocument(pair: Row, side: string) {
   await action(async () => {
-    documentData.value = await api("/pairs/" + pair.id + "/document/" + side);
+    documentData.value = await readDocument(pair, side);
     documentOpen.value = true;
   });
 }
@@ -1420,11 +1461,15 @@ onUnmounted(() => clearInterval(timer));
       :closable="false"
     /><el-alert
       v-if="editTarget.changed"
-      title="当前源内容与扫描快照不同，下方显示源系统最新文本，请重新核对。"
+      title="已读取的源内容与扫描快照不同，请重新核对；提交前会再次校验。"
       type="warning"
       :closable="false"
     /><template v-if="live"
       ><p>{{ live.knowledge_name }} / {{ live.document_name }}</p>
+      <el-button v-if="editTarget.kind !== 'delete_document'" text :disabled="busy"
+        @click="edit(editTarget.pair, editTarget.side, editTarget.kind, true)">
+        重新读取原文（覆盖未保存编辑）
+      </el-button>
       <el-form v-if="editTarget.kind !== 'delete_document'" label-position="top"
         ><el-form-item label="标题"
           ><el-input

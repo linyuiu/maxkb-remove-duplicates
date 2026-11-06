@@ -154,3 +154,50 @@ def test_document_delete_requires_positive_ack():
         with pytest.raises(APIError) as exc:
             api.mutate("delete_document", TARGET, None)
     assert exc.value.uncertain
+
+
+@pytest.mark.parametrize("paragraph_id,expected_pages", [("p0", 1), ("p31", 2), ("missing", 3)])
+def test_current_stops_at_matching_page(paragraph_id, expected_pages):
+    calls = []
+    def handler(request):
+        page = int(request.url.path.split("/")[-2])
+        calls.append(page)
+        rows = [{"id": f"p{i}", "document_id": "document", "title": "", "content": "text"}
+                for i in range((page - 1) * 30, min(page * 30, 65))]
+        return httpx.Response(200, json={"code": 200, "data": {"total": 65, "records": rows}})
+    with MaxKBAPI(source(), transport=httpx.MockTransport(handler)) as api:
+        result = api.current({**TARGET, "paragraph_id": paragraph_id})
+    assert calls == list(range(1, expected_pages + 1))
+    assert (result is None) == (paragraph_id == "missing")
+    calls.clear()
+    with MaxKBAPI(source(), transport=httpx.MockTransport(handler)) as api:
+        assert len(api.document(TARGET)) == 65
+    assert calls == [1, 2, 3]
+
+
+def test_current_rejects_changing_page_total():
+    def handler(request):
+        page = int(request.url.path.split("/")[-2])
+        return httpx.Response(200, json={"code": 200, "data": {
+            "total": 60 if page == 1 else 61,
+            "records": [{"id": f"p{page}", "document_id": "document", "content": "text"}],
+        }})
+    with MaxKBAPI(source(), transport=httpx.MockTransport(handler)) as api:
+        with pytest.raises(APIError, match="数量变化"):
+            api.current(TARGET)
+
+
+def test_document_preview_includes_paragraph_hash(monkeypatch):
+    from app import main
+    from app.security import content_hash
+    target = {**TARGET, "document_name": "Document"}
+    monkeypatch.setattr(main, "pair_target", lambda *args: (None, None, source(), target))
+    class Client:
+        def __init__(self, source): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def document(self, target):
+            return [{"id": "p31", "title": "Title", "content": "Body"}]
+    monkeypatch.setattr(main, "MaxKBAPI", Client)
+    result = main.document_content("pair", "left", s=None, user=None)
+    assert result["records"][0]["content_hash"] == content_hash("Title", "Body")
