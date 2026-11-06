@@ -83,4 +83,4 @@ docker image save -o docker/images/images.tar maxkb-remove-duplicates:latest pos
 
 修改镜像版本时，同步修改配置模板的 `IMAGE_TAG`。
 
-技术细节和源码运行方式见 [开发说明](docs/REFERENCE.md)，需求与设计见 [PLAN.md](PLAN.md)。
+需求与设计见 [PLAN.md](PLAN.md)。

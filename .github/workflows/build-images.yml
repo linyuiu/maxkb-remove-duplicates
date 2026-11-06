@@ -109,7 +109,6 @@ jobs:
           cp install/install.sh install/.env.example "$directory/install/"
           cp docker/compose.yaml "$directory/docker/"
           cp README.md PLAN.md "$directory/"
-          cp -r docs "$directory/docs"
           export PACKAGE_DIRECTORY="$directory"
           python3 - <<'PYTHON'
           import json, os
