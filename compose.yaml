@@ -1,0 +1,51 @@
+# Source build entry point; installation packages use docker/compose.yaml.
+name: maxkb-remove-duplicates
+services:
+  postgres:
+    image: postgres:16
+    pull_policy: missing
+    environment:
+      POSTGRES_USER: ${DB_USER:?Please configure DB_USER in .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Please configure DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_NAME:?Please configure DB_NAME in .env}
+      PGPORT: ${DB_PORT:-5432}
+    command: [postgres, -p, '${DB_PORT:-5432}']
+    volumes:
+      - type: bind
+        source: ${WORK_DIR:-./work}/maxkb-remove-duplicates/postgres
+        target: /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -p "$$PGPORT"']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 30s
+    restart: unless-stopped
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: maxkb-remove-duplicates:${IMAGE_VERSION:?Please configure IMAGE_VERSION in .env}
+    pull_policy: never
+    env_file: ./.env
+    environment:
+      INGESTION_DATA_DIR: /data/ingestion
+      SOURCE_DIR: /sources
+    ports:
+      - '${WEB_PORT:-8080}:8000'
+    volumes:
+      - type: bind
+        source: ${WORK_DIR:-./work}/maxkb-remove-duplicates/ingestion
+        target: /data/ingestion
+      - type: bind
+        source: ${WORK_DIR:-./work}/maxkb-remove-duplicates/documents
+        target: /sources
+        bind:
+          create_host_path: true
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+    stop_grace_period: 120s
+    restart: unless-stopped

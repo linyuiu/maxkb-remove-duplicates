@@ -2,6 +2,44 @@
 
 支持文档入库和相似段落扫描。前后端由 FastAPI 提供，PostgreSQL 独立运行。
 
+## 从源码构建运行
+
+需要 Docker Engine、Docker Compose V2 和可下载构建依赖的网络。在源码根目录使用 `compose.yaml`；安装包使用 `docker/compose.yaml`。
+
+首次没有根目录 `.env` 时，编辑 `install/.env.example`，配置 `WORK_DIR`、数据库密码和 `ALLOWED_ORIGINS`（网页实际访问的协议、主机和端口），然后执行：
+
+```bash
+bash install/install.sh --init-env
+# 默认 WORK_DIR=./work；自定义目录时改为脚本输出的配置文件路径。
+ln -s ./work/maxkb-remove-duplicates/.env .env
+```
+
+初始化会生成加密密钥和管理员初始密码。已有 `.env` 时直接使用现有配置，容器内数据库主机应配置为 `DB_HOST=postgres`，并检查 `IMAGE_VERSION=v1.0.0`；不要保留指向其他数据库的 `DATABASE_URL`。
+
+在源码根目录构建并启动：
+
+```bash
+docker compose up -d --build
+```
+
+也可以分别执行：
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+应用通过同一个 `docker/Dockerfile` 构建，缺少 `postgres:16` 时自动拉取。数据保存在 `WORK_DIR/maxkb-remove-duplicates/` 的 `postgres/`、`ingestion/`、`documents/`，默认位于源码目录下的 `work/`。后续修改根目录 `.env`；使用上述符号链接时，它与工作目录配置是同一个文件。
+
+查看日志和停止服务也在源码根目录执行：
+
+```bash
+docker compose logs -f app postgres
+docker compose down
+```
+
+切换源码构建和安装包运行时，使用相同的工作目录、数据库配置和加密密钥。
+
 ## 下载安装包
 
 在 [GitHub Actions](https://github.com/linyuiu/maxkb-remove-duplicates/actions/workflows/build-images.yml) 点击 **Run workflow**：
@@ -70,17 +108,6 @@ docker compose up -d --force-recreate    # 修改 .env 后重新创建容器
 
 MaxKB API 地址示例：`http://maxkb.example.com:18080/admin/api`，请替换为实际地址。系统数据库与 MaxKB 源数据库需分开配置。
 
-## 手动构建镜像
-
-在源码根目录执行，架构与目标服务器保持一致：
-
-```bash
-docker build -f docker/Dockerfile -t maxkb-remove-duplicates:v1.0.0 .
-docker pull postgres:16
-mkdir -p docker/images
-docker image save -o docker/images/images.tar maxkb-remove-duplicates:v1.0.0 postgres:16
-```
-
-镜像版本通过 `.env` 的 `IMAGE_VERSION=v1.0.0` 配置；首次安装修改 `install/.env.example`，安装后修改服务目录中的 `.env`。版本需要与已加载的镜像标签一致。
+镜像版本通过 `.env` 的 `IMAGE_VERSION=v1.0.0` 配置，GitHub 打包时会同步写入安装模板。源码修改后执行 `docker compose up -d --build`；安装包的版本需与已加载的镜像标签一致。
 
 需求与设计见 [PLAN.md](PLAN.md)。
