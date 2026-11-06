@@ -108,7 +108,6 @@ jobs:
           mkdir -p "$directory/install" "$directory/docker/images" output
           cp install/install.sh install/.env.example "$directory/install/"
           cp docker/compose.yaml "$directory/docker/"
-          cp README.md PLAN.md "$directory/"
           export PACKAGE_DIRECTORY="$directory"
           python3 - <<'PYTHON'
           import json, os
