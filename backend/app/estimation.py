@@ -5,7 +5,7 @@ import os
 from statistics import median
 from sqlalchemy import select
 from .models import Run
-from .source import connect, check_models
+from .source import connect, check_models, check_vector_readiness
 
 COUNT_SQL = """
 WITH p AS (
@@ -75,6 +75,7 @@ def timing(comparisons, chunks, dimension, historical_rates):
 def estimate(source, config, session):
     with connect(source) as connection:
         check_models(connection, config["knowledge_ids"])
+        check_vector_readiness(connection, config["knowledge_ids"])
         rows = connection.execute(
             COUNT_SQL, (config["knowledge_ids"], config["knowledge_ids"])
         ).fetchall()

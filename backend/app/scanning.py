@@ -8,7 +8,7 @@ from sqlalchemy import select, update, func, text
 from sqlalchemy.dialects.postgresql import insert
 from .db import transaction
 from .models import Run, Pair, ParagraphSnapshot, DataSource, now
-from .source import connect, check_models, SNAPSHOT_SQL, paragraph_data
+from .source import connect, check_models, SNAPSHOT_SQL, paragraph_data, check_vector_readiness
 
 LEASE_SECONDS = 180
 
@@ -143,6 +143,7 @@ def take_snapshot(run_id, token, conn, control=None):
             raise ValueError("已有部分数据的运行不可接入新源快照，请创建重试运行")
         config = run.config.copy()
     check_models(conn, config["knowledge_ids"])
+    check_vector_readiness(conn, config["knowledge_ids"])
     dimension, seen = None, set()
     group_counts = {}
     with conn.cursor(name="dedup_paragraph_snapshot") as cursor:

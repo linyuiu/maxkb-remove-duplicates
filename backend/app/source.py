@@ -32,7 +32,7 @@ def list_knowledge(source):
             SELECT k.id::text AS id, k.name, k.workspace_id, k.embedding_model_id::text,
                    m.name AS model_name
             FROM knowledge k LEFT JOIN model m ON m.id=k.embedding_model_id
-            WHERE EXISTS (SELECT 1 FROM embedding e WHERE e.knowledge_id=k.id AND e.source_type='1')
+            WHERE EXISTS (SELECT 1 FROM paragraph p WHERE p.knowledge_id=k.id)
             ORDER BY k.workspace_id, k.name, k.id
         """).fetchall()
 
@@ -125,3 +125,48 @@ def document_exists(source, target):
             WHERE d.id=%s::uuid AND d.knowledge_id=%s::uuid AND k.workspace_id=%s) AS present""",
             (target["document_id"], target["knowledge_id"], target["workspace_id"]),
         ).fetchone()["present"]
+
+
+# MaxKB encodes EMBEDDING (TaskType=1) in the last status character.
+READINESS_SQL = """
+WITH paragraphs AS (
+ SELECT p.document_id, p.knowledge_id,
+        CASE right(coalesce(p.status,''),1)
+          WHEN '0' THEN '等待向量化'
+          WHEN '1' THEN '正在向量化'
+          WHEN '3' THEN '向量化失败'
+          WHEN '4' THEN '向量化取消中'
+          WHEN '5' THEN '向量化已取消'
+          WHEN '2' THEN CASE WHEN EXISTS (
+            SELECT 1 FROM embedding e WHERE e.paragraph_id=p.id
+              AND e.document_id=p.document_id AND e.knowledge_id=p.knowledge_id
+              AND e.source_type='1' AND e.embedding IS NOT NULL
+          ) THEN NULL ELSE '缺少正文向量' END
+          ELSE '向量化未完成或状态未知'
+        END AS reason
+ FROM paragraph p WHERE p.knowledge_id=ANY(%s::uuid[])
+), issues AS (
+ SELECT knowledge_id, document_id, reason, count(*) AS count
+ FROM paragraphs WHERE reason IS NOT NULL
+ GROUP BY knowledge_id, document_id, reason
+)
+SELECT i.*, k.name AS knowledge_name, d.name AS document_name,
+       sum(i.count) OVER () AS total
+FROM issues i LEFT JOIN knowledge k ON k.id=i.knowledge_id
+LEFT JOIN document d ON d.id=i.document_id
+ORDER BY i.knowledge_id, i.document_id, i.reason LIMIT 20
+"""
+
+
+def check_vector_readiness(conn, ids):
+    rows = conn.execute(READINESS_SQL, (ids,)).fetchall()
+    if rows:
+        details = '\n'.join(
+            f"{r['knowledge_name'] or r['knowledge_id']} / "
+            f"{r['document_name'] or r['document_id']}：{r['reason']} {r['count']} 段"
+            for r in rows
+        )
+        raise ValueError(
+            f"未执行扫描：所选知识库有 {int(rows[0]['total'])} 个段落的向量未就绪。"
+            f"请在 MaxKB 完成向量化后重新扫描。\n问题明细（最多 20 项）：\n{details}"
+        )

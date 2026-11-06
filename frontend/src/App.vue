@@ -135,8 +135,14 @@ async function action(fn: () => Promise<void>) {
   try {
     await fn();
   } catch (e: any) {
-    if (e !== "cancel" && e !== "close")
-      ElMessage.error(e.message || String(e));
+    if (e !== "cancel" && e !== "close") {
+      const message = e.message || String(e);
+      if (message.startsWith("未执行扫描：")) {
+        await ElMessageBox.alert(message, "向量未就绪", {
+          confirmButtonText: "知道了", customClass: "vector-readiness-dialog",
+        }).catch(() => {});
+      } else ElMessage.error(message);
+    }
   } finally {
     busy.value = false;
   }

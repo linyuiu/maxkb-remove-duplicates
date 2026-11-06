@@ -968,3 +968,6 @@ h4,
 .user-menu-trigger:hover { background: #f5f5f5; }
 .user-menu-trigger .avatar { margin-right: 0; }
 .user-menu-trigger:focus-visible { outline: 2px solid #737373; outline-offset: 2px; }
+
+.vector-readiness-dialog { width: min(680px, calc(100vw - 32px)); max-width: calc(100vw - 32px); }
+.vector-readiness-dialog .el-message-box__message { max-height: 55vh; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

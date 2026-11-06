@@ -84,7 +84,7 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
             "CREATE TABLE document(id uuid primary key,name text,knowledge_id uuid)"
         )
         c.execute(
-            "CREATE TABLE paragraph(id uuid primary key,title text,content text,document_id uuid,knowledge_id uuid,update_time timestamptz default now(),position int default 1)"
+            "CREATE TABLE paragraph(id uuid primary key,title text,content text,document_id uuid,knowledge_id uuid,update_time timestamptz default now(),position int default 1,status text default 'nnn2')"
         )
         c.execute(
             "CREATE TABLE embedding(id text primary key,embedding vector,paragraph_id uuid,document_id uuid,knowledge_id uuid,source_type text)"
