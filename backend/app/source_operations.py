@@ -67,6 +67,9 @@ def execute_operation(operation_id, user_id, reconcile=False):
                 api = MaxKBAPI(source)
                 if not reconcile:
                     op.state = "executing"
+            # Persisted executing is an intent, not evidence of an HTTP write.
+            # Reconciliation concerns an earlier write whose outcome is unknown.
+            mutation_started = reconcile
             try:
                 with api:
                     if not reconcile:
@@ -89,6 +92,7 @@ def execute_operation(operation_id, user_id, reconcile=False):
                                 "源内容已变化或已删除，请刷新后重新操作",
                             )
                         # No source-side conditional update contract was supplied.
+                        mutation_started = True
                         api.mutate(kind, target, proposed)
                     if kind == "delete_document":
                         exists = document_exists(source, target)
@@ -127,15 +131,21 @@ def execute_operation(operation_id, user_id, reconcile=False):
                 return record(
                     operation_id,
                     user_id,
-                    "unknown"
-                    if reconcile or exc.uncertain or op.state == "executing"
-                    else "failed",
+                    "unknown" if mutation_started else "failed",
                     None,
-                    str(exc),
+                    (
+                        str(exc) if mutation_started else
+                        f"未发送修改/删除请求：{exc}；请刷新原文后重新操作"
+                    ),
                 )
             except Exception:
                 return record(
-                    operation_id, user_id, "unknown", None, "操作结果待核实，未自动重试"
+                    operation_id, user_id,
+                    "unknown" if mutation_started else "failed", None,
+                    (
+                        "操作结果待核实，未自动重试" if mutation_started else
+                        "读取源内容失败，未发送修改/删除请求；请刷新原文后重新操作"
+                    ),
                 )
         finally:
             guard.execute(
