@@ -59,9 +59,7 @@ mkdir -p -- "$INSTALL_DIR" "$INSTALL_DIR/postgres" "$INSTALL_DIR/ingestion" "$IN
 ENV_FILE="$INSTALL_DIR/.env"
 if [[ -f "$ENV_FILE" ]]; then
   recorded_dir="$(read_setting INSTALL_DIR "$ENV_FILE")"
-  if [[ -z "$recorded_dir" ]]; then
-    printf "\nINSTALL_DIR='%s'\n" "$INSTALL_DIR" >> "$ENV_FILE"
-  elif [[ "$recorded_dir" != "$INSTALL_DIR" ]]; then
+  if [[ -n "$recorded_dir" && "$recorded_dir" != "$INSTALL_DIR" ]]; then
     printf '%s\n' '已有 .env 的 INSTALL_DIR 与当前工作目录不同，请核对配置后再安装。' >&2; exit 1
   fi
   printf '%s\n' '保留工作目录下已有 .env，不覆盖数据库密码、管理员密码和加密密钥。'
@@ -92,18 +90,33 @@ else
   rm -f -- "$temp_file"; trap - EXIT
 fi
 # Runtime Compose uses relative mounts, so it can run without the installation package.
-COMPOSE_FILE_PATH="$INSTALL_DIR/compose.yaml"
-if [[ -f "$COMPOSE_FILE_PATH" ]] && ! cmp -s "$COMPOSE_TEMPLATE" "$COMPOSE_FILE_PATH"; then
-  cp -p -- "$COMPOSE_FILE_PATH" "$COMPOSE_FILE_PATH.bak"
-fi
-compose_temp="$(mktemp "$INSTALL_DIR/.compose.yaml.XXXXXX")"
-trap 'rm -f -- "${compose_temp:-}"' EXIT
-cp -- "$COMPOSE_TEMPLATE" "$compose_temp"
-mv -f -- "$compose_temp" "$COMPOSE_FILE_PATH"
-trap - EXIT
+install_compose() {
+  local compose_file="$INSTALL_DIR/compose.yaml"
+  if [[ -f "$compose_file" ]]; then
+    if cmp -s "$COMPOSE_TEMPLATE" "$compose_file"; then
+      return
+    fi
+    cp -p -- "$compose_file" "$compose_file.bak"
+  fi
+  compose_temp="$(mktemp "$INSTALL_DIR/.compose.yaml.XXXXXX")"
+  trap 'rm -f -- "${compose_temp:-}"' EXIT
+  cp -- "$COMPOSE_TEMPLATE" "$compose_temp"
+  mv -f -- "$compose_temp" "$compose_file"
+  trap - EXIT
+}
+
 printf '服务目录：%s\n配置文件：%s\n本地文档目录：%s\n' "$INSTALL_DIR" "$ENV_FILE" "$INSTALL_DIR/documents"
 
-[[ "$INIT_ONLY" == false ]] || exit 0
+if [[ "$INIT_ONLY" == true ]]; then
+  install_compose
+  exit 0
+fi
+
+package_image_version="$(read_setting IMAGE_VERSION "$TEMPLATE_FILE")"
+[[ "$package_image_version" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]] || {
+  printf '%s\n' 'install/.env.example 的 IMAGE_VERSION 缺失或无效。' >&2
+  exit 1
+}
 
 command -v docker >/dev/null 2>&1 || { printf '%s\n' '请先安装 Docker Engine 和 Docker Compose V2。' >&2; exit 1; }
 docker compose version >/dev/null 2>&1 || { printf '%s\n' '需要 Docker Compose V2（docker compose）。' >&2; exit 1; }
@@ -117,7 +130,40 @@ for image_file in "${images[@]}"; do
   printf '加载镜像：%s\n' "$(basename -- "$image_file")"
   docker image load --input "$image_file"
 done
+docker image inspect "maxkb-remove-duplicates:$package_image_version" postgres:16 >/dev/null || {
+  printf '未找到镜像 maxkb-remove-duplicates:%s 或 postgres:16。请核对安装包。\n' "$package_image_version" >&2
+  exit 1
+}
+
+version_temp="$(mktemp "$INSTALL_DIR/.env.version.XXXXXX")"
+trap 'rm -f -- "${version_temp:-}"' EXIT
+cp -p -- "$ENV_FILE" "$version_temp"
+awk -v version="$package_image_version" '
+  /^[[:blank:]]*IMAGE_VERSION[[:blank:]]*=/ {
+    if (++matches > 1) exit 1
+    ending = ($0 ~ /\r$/) ? "\r" : ""
+    print "IMAGE_VERSION=" version ending
+    next
+  }
+  { print }
+  END {
+    if (!matches) print "IMAGE_VERSION=" version
+  }
+' "$ENV_FILE" > "$version_temp" || {
+  printf '%s\n' '无法更新 .env 的 IMAGE_VERSION，请检查是否存在重复配置。' >&2
+  exit 1
+}
+
+if ! cmp -s "$ENV_FILE" "$version_temp"; then
+  mv -f -- "$version_temp" "$ENV_FILE"
+  printf '已更新镜像版本：%s\n' "$package_image_version"
+fi
+rm -f -- "$version_temp"
+trap - EXIT
+
+install_compose
 cd -- "$INSTALL_DIR"
+unset IMAGE_VERSION
 compose=(docker compose --env-file .env -f compose.yaml)
 printf '%s\n' '停止旧容器并保留数据，然后启动 PostgreSQL 和应用。'
 "${compose[@]}" down --remove-orphans

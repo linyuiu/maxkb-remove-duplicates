@@ -10,8 +10,8 @@
 
 ```bash
 bash install/install.sh --init-env
-# 默认 WORK_DIR=./work；自定义目录时改为脚本输出的配置文件路径。
-ln -s ./work/maxkb-remove-duplicates/.env .env
+# 自定义 WORK_DIR 时改为脚本输出的配置文件路径。
+ln -s /opt/maxkb-remove-duplicates/.env .env
 ```
 
 初始化会生成加密密钥和管理员初始密码。已有 `.env` 时直接使用现有配置，容器内数据库主机应配置为 `DB_HOST=postgres`，并检查 `IMAGE_VERSION=v1.0.0`；不要保留指向其他数据库的 `DATABASE_URL`。
@@ -29,7 +29,7 @@ docker compose build
 docker compose up -d
 ```
 
-应用通过同一个 `docker/Dockerfile` 构建，缺少 `postgres:16` 时自动拉取。数据保存在 `WORK_DIR/maxkb-remove-duplicates/` 的 `postgres/`、`ingestion/`、`documents/`，默认位于源码目录下的 `work/`。后续修改根目录 `.env`；使用上述符号链接时，它与工作目录配置是同一个文件。
+应用通过同一个 `docker/Dockerfile` 构建，缺少 `postgres:16` 时自动拉取。数据保存在 `WORK_DIR/maxkb-remove-duplicates/` 的 `postgres/`、`ingestion/`、`documents/`，默认位于 `/opt/maxkb-remove-duplicates/`。后续修改根目录 `.env`；使用上述符号链接时，它与工作目录配置是同一个文件。
 
 查看日志和停止服务也在源码根目录执行：
 
@@ -53,7 +53,7 @@ docker compose down
 
 服务器需要 Docker Engine、Docker Compose V2 和 Bash。
 
-1. 编辑 `install/.env.example`，设置 `WORK_DIR`、数据库密码、访问地址等参数。`WORK_DIR` 默认 `./work`，相对于安装包根目录，也可填写绝对路径。
+1. 编辑 `install/.env.example`，设置 `WORK_DIR`、数据库密码、访问地址等参数。`WORK_DIR` 默认 `/opt`，服务目录为 `/opt/maxkb-remove-duplicates`。执行安装的用户需要有权创建并写入服务目录，也可以填写其他路径。
 2. 在安装包目录执行：
 
 ```bash
@@ -73,7 +73,9 @@ WORK_DIR/maxkb-remove-duplicates/
 
 首次启动自动创建数据库、业务表和管理员。通过部署主机的 `WEB_PORT` 访问，默认端口 8080；管理员初始账号密码在生成的 `.env` 中查看。
 
-已有 `.env` 不会覆盖。安装后修改服务目录中的 `.env`，不是模板；已有数据库及管理员密码也不会随配置修改自动重置。
+`ALLOWED_ORIGINS` 用于 CORS 和写请求的来源校验。填写浏览器实际访问页面的协议、主机和端口，例如 `http://192.168.1.20:8080`。多个地址用英文逗号分隔，不加空格、路径或末尾斜杠。
+
+正式安装或升级会将包内镜像版本同步到服务目录 `.env` 的 `IMAGE_VERSION`，保留其他配置。安装后在服务目录的 `.env` 中修改运行配置。已有数据库及管理员密码也不会随配置修改自动重置。
 
 仅生成配置和目录、不操作 Docker：
 
@@ -86,7 +88,7 @@ bash install/install.sh --init-env
 进入生成的服务目录后执行，无需再指定配置文件路径：
 
 ```bash
-cd /path/to/example/work/maxkb-remove-duplicates
+cd /opt/maxkb-remove-duplicates
 
 docker compose up -d                    # 启动
 docker compose down                     # 停止，保留数据
@@ -111,6 +113,6 @@ docker compose up -d --force-recreate    # 修改 .env 后重新创建容器
 
 MaxKB API 地址示例：`http://maxkb.example.com:18080/admin/api`，请替换为实际地址。系统数据库与 MaxKB 源数据库需分开配置。
 
-镜像版本通过 `.env` 的 `IMAGE_VERSION=v1.0.0` 配置，GitHub 打包时会同步写入安装模板。源码修改后执行 `docker compose up -d --build`；安装包的版本需与已加载的镜像标签一致。
+Compose 通过服务目录 `.env` 的 `IMAGE_VERSION` 选择镜像标签。源码修改后执行 `docker compose up -d --build`。原地升级时，在新包的 `install/.env.example` 填写原来的 `WORK_DIR`，备份服务目录后执行 `bash install/install.sh`。安装脚本会验证包内镜像已加载，再更新 `IMAGE_VERSION` 并重启服务。
 
 需求与设计见 [PLAN.md](PLAN.md)。
