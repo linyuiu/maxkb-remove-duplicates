@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, or_
 from sqlalchemy.exc import IntegrityError
 from psycopg.conninfo import make_conninfo, conninfo_to_dict
 from .db import Session, transaction
@@ -114,8 +114,8 @@ def auth(request: Request):
         return user
 
 
-def get(s, model, key):
-    obj = s.get(model, key)
+def get(s, model, key, *, for_update=False):
+    obj = s.get(model, key, with_for_update=for_update)
     if not obj:
         raise HTTPException(404, "记录不存在")
     return obj
@@ -243,8 +243,19 @@ class SourceBody(BaseModel):
     enabled: bool = True
 
 
-def source_view(source):
+def source_target_in_use(source_id):
+    return or_(
+        select(Task.id).where(Task.source_id == source_id).exists(),
+        select(Run.id).where(Run.config["source_id"].as_string() == source_id).exists(),
+        select(Operation.id).where(
+            Operation.target["source_id"].as_string() == source_id
+        ).exists(),
+    )
+
+
+def source_view(source, target_in_use=False):
     value = serialize(source)
+    value["database_target_locked"] = bool(source.connection and target_in_use)
     value["api_configured"] = bool(source.api_base_url and source.api_key)
     info = conninfo_to_dict(decrypt(source.connection)) if source.connection else {}
     value["api_only"] = not bool(source.connection)
@@ -265,10 +276,11 @@ def connection_info(body):
 
 @app.get("/api/sources")
 def sources(s=Depends(db), user=Depends(auth)):
-    return [
-        source_view(v)
-        for v in s.scalars(select(DataSource).order_by(DataSource.created_at.desc()))
-    ]
+    rows = s.execute(
+        select(DataSource, source_target_in_use(DataSource.id))
+        .order_by(DataSource.created_at.desc())
+    )
+    return [source_view(source, target_in_use) for source, target_in_use in rows]
 
 
 @app.post("/api/sources")
@@ -298,14 +310,19 @@ def edit_source(source_id: str, body: SourceBody, user=Depends(auth)):
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     with transaction() as s:
-        source = get(s, DataSource, source_id)
+        source = get(s, DataSource, source_id, for_update=True)
         old = conninfo_to_dict(decrypt(source.connection)) if source.connection else {}
-        if source.connection and any(
-            str(getattr(body, k)) != str(old.get(k)) for k in ["host", "port", "dbname"]
-        ):
-            raise HTTPException(400, "数据库目标变化请创建新数据源，以保留历史关联")
+        target_changed = bool(old) and any(
+            str(getattr(body, key)) != str(old.get(key)) for key in ("host", "port", "dbname")
+        )
+        target_in_use = s.scalar(select(source_target_in_use(source.id)))
+        if target_changed and target_in_use:
+            raise HTTPException(400, "该数据源已关联扫描任务或历史记录，请新建数据源以更换数据库目标")
         info = connection_info(body)
-        if info: info["password"] = body.password or old.get("password", "")
+        if info:
+            if target_changed and old.get("password") and not body.password:
+                raise HTTPException(400, "数据库目标已更换，请重新填写数据库密码")
+            info["password"] = body.password or old.get("password", "")
         source.name, source.enabled, source.connection = (
             body.name,
             body.enabled,
@@ -316,7 +333,7 @@ def edit_source(source_id: str, body: SourceBody, user=Depends(auth)):
         source.api_base_url = base
         if body.api_key.strip():
             source.api_key = encrypt(body.api_key.strip())
-        return source_view(source)
+        return source_view(source, target_in_use)
 
 
 @app.get("/api/sources/{source_id}/knowledge")
@@ -419,7 +436,7 @@ def create_task(body: TaskBody, user=Depends(auth)):
     values = task_values(body)
     require_schedule_confirmation(body, values, user)
     with transaction() as s:
-        source = get(s, DataSource, body.source_id)
+        source = get(s, DataSource, body.source_id, for_update=True)
         if not source.connection:raise HTTPException(400,"此连接仅配置 API，扫描需要数据库连接")
         if body.enabled and not source.enabled:
             raise HTTPException(409, "数据源已停用")
@@ -439,7 +456,7 @@ def edit_task(task_id: str, body: TaskBody, user=Depends(auth)):
         ).scalar_one_or_none()
         if not task:
             raise HTTPException(404, "任务不存在")
-        source = get(s, DataSource, body.source_id)
+        source = get(s, DataSource, body.source_id, for_update=True)
         if not source.connection:raise HTTPException(400,"此连接仅配置 API，扫描需要数据库连接")
         if body.enabled and not source.enabled:
             raise HTTPException(409, "数据源已停用")

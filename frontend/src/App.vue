@@ -1305,18 +1305,21 @@ onUnmounted(() => clearInterval(timer));
         <el-form-item label="数据库主机（仅入库可留空）"
           ><el-input
             v-model="sourceForm.host"
-            :disabled="!!sourceForm.id && !sourceForm.api_only" /></el-form-item
+            :disabled="sourceForm.database_target_locked ?? (!!sourceForm.id && !sourceForm.api_only)" /></el-form-item
         ><el-form-item label="端口"
           ><el-input-number
             v-model="sourceForm.port"
-            :disabled="!!sourceForm.id && !sourceForm.api_only"
+            :disabled="sourceForm.database_target_locked ?? (!!sourceForm.id && !sourceForm.api_only)"
             :min="1"
             :max="65535"
         /></el-form-item>
       </div>
       <el-form-item label="数据库"
-        ><el-input v-model="sourceForm.dbname" :disabled="!!sourceForm.id && !sourceForm.api_only"
+        ><el-input v-model="sourceForm.dbname" :disabled="sourceForm.database_target_locked ?? (!!sourceForm.id && !sourceForm.api_only)"
       /></el-form-item>
+      <p v-if="sourceForm.database_target_locked" class="small muted">
+        已关联扫描任务或历史记录。如需更换数据库主机、端口或库名，请新建数据源。
+      </p>
       <div class="form-row">
         <el-form-item label="数据库用户"
           ><el-input v-model="sourceForm.user" /></el-form-item
@@ -1328,6 +1331,9 @@ onUnmounted(() => clearInterval(timer));
             autocomplete="new-password"
         /></el-form-item>
       </div>
+      <p v-if="sourceForm.id && !sourceForm.api_only && !sourceForm.database_target_locked" class="small muted">
+        更换数据库主机、端口或库名时，请重新填写数据库密码。
+      </p>
       <el-form-item label="SSL"
         ><el-select v-model="sourceForm.sslmode"
           ><el-option
