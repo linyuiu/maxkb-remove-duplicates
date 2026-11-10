@@ -53,7 +53,7 @@ docker compose down
 
 服务器需要 Docker Engine、Docker Compose V2 和 Bash。
 
-首次使用 PostgreSQL 18 安装包时，请使用空的服务目录。若已有旧版数据，可在模板中指定一个新的 `WORK_DIR`，例如 `/opt/maxkb-clean`。
+PostgreSQL 18 的数据固定存放在服务目录的 `postgres/18/docker/` 下。升级时使用原来的 `WORK_DIR`，全新安装时使用空的服务目录。
 
 1. 编辑 `install/.env.example`，设置 `WORK_DIR`、数据库密码、访问地址等参数。`WORK_DIR` 默认 `/opt`，服务目录为 `/opt/maxkb-remove-duplicates`。执行安装的用户需要有权创建并写入服务目录，也可以填写其他路径。
 2. 在安装包目录执行：

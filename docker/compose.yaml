@@ -4,6 +4,7 @@ services:
     image: postgres:18
     pull_policy: never
     environment:
+      PGDATA: /var/lib/postgresql/18/docker
       POSTGRES_USER: ${DB_USER:?Please configure DB_USER in .env}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?Please configure DB_PASSWORD in .env}
       POSTGRES_DB: ${DB_NAME:?Please configure DB_NAME in .env}
