@@ -47,7 +47,7 @@ docker compose down
 - `architecture`：选择 `amd64`、`arm64` 或 `both`。
 - `image_tag`：镜像版本，默认 `v1.0.0`。
 
-构建完成后，从 **Artifacts** 下载对应架构的安装包。解压 ZIP，再解压其中的 `.tar.gz`，包内已包含应用、PostgreSQL 镜像和安装脚本。产物保留 14 天。
+构建完成后，从 **Artifacts** 直接下载对应架构的 `.tar.gz`，解压一次即可。包内的应用和 PostgreSQL 镜像由安装脚本自动加载。构建摘要提供安装包的 SHA-256 校验值，产物保留 14 天。
 
 ## 安装
 
