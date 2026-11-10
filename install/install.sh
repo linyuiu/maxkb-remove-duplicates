@@ -55,7 +55,18 @@ INSTALL_DIR="$WORK_DIR/maxkb-remove-duplicates"
 case "$WORK_DIR" in
   *\'*|*$'\n'*|*$'\r'*) printf '%s\n' '工作目录不能包含单引号或换行符。' >&2; exit 1 ;;
 esac
-mkdir -p -- "$INSTALL_DIR" "$INSTALL_DIR/postgres" "$INSTALL_DIR/ingestion" "$INSTALL_DIR/documents"
+postgres_dir="$INSTALL_DIR/postgres"
+if [[ -d "$postgres_dir" && ! -x "$postgres_dir" ]]; then
+  printf '无法检查数据库目录 %s。请使用有权限的账户检查现有 PostgreSQL 数据版本。\n' "$postgres_dir" >&2
+  exit 1
+fi
+if [[ -e "$postgres_dir/PG_VERSION" ]]; then
+  printf '检测到旧版 PostgreSQL 数据目录 %s。请在 install/.env.example 中指定新的 WORK_DIR，再全新安装 PostgreSQL 18。\n' "$postgres_dir" >&2
+  exit 1
+fi
+mkdir -p -- "$INSTALL_DIR" "$INSTALL_DIR/ingestion" "$INSTALL_DIR/documents"
+# PostgreSQL runs as a different user and must traverse the parent of its PGDATA.
+mkdir -p -m 0755 -- "$postgres_dir"
 ENV_FILE="$INSTALL_DIR/.env"
 if [[ -f "$ENV_FILE" ]]; then
   recorded_dir="$(read_setting INSTALL_DIR "$ENV_FILE")"
@@ -124,14 +135,14 @@ docker info >/dev/null 2>&1 || { printf '%s\n' 'Docker 服务未启动或当前�
 shopt -s nullglob
 images=("$IMAGES_DIR"/*.tar "$IMAGES_DIR"/*.tar.gz "$IMAGES_DIR"/*.tgz)
 if [[ ${#images[@]} -eq 0 ]]; then
-  printf '%s\n' 'docker/images 没有镜像包，请放入应用和 postgres:16 镜像包。' >&2; exit 1
+  printf '%s\n' 'docker/images 没有镜像包，请放入应用和 postgres:18 镜像包。' >&2; exit 1
 fi
 for image_file in "${images[@]}"; do
   printf '加载镜像：%s\n' "$(basename -- "$image_file")"
   docker image load --input "$image_file"
 done
-docker image inspect "maxkb-remove-duplicates:$package_image_version" postgres:16 >/dev/null || {
-  printf '未找到镜像 maxkb-remove-duplicates:%s 或 postgres:16。请核对安装包。\n' "$package_image_version" >&2
+docker image inspect "maxkb-remove-duplicates:$package_image_version" postgres:18 >/dev/null || {
+  printf '未找到镜像 maxkb-remove-duplicates:%s 或 postgres:18。请核对安装包。\n' "$package_image_version" >&2
   exit 1
 }
 

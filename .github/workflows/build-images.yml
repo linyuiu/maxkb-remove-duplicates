@@ -95,8 +95,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker pull --platform "linux/$TARGET_ARCH" postgres:16
-          for image in "maxkb-remove-duplicates:$IMAGE_TAG" postgres:16; do
+          docker pull --platform "linux/$TARGET_ARCH" postgres:18
+          for image in "maxkb-remove-duplicates:$IMAGE_TAG" postgres:18; do
             actual="$(docker image inspect "$image" --format '{{.Architecture}}')"
             if [[ "$actual" != "$TARGET_ARCH" ]]; then
               echo "Image architecture mismatch: $image" >&2
@@ -126,7 +126,7 @@ jobs:
               'commit': os.environ['GITHUB_SHA'],
           }, indent=2) + '\n')
           PYTHON
-          docker image save "maxkb-remove-duplicates:$IMAGE_TAG" postgres:16 | gzip -1 > "$directory/docker/images/images-$TARGET_ARCH.tar.gz"
+          docker image save "maxkb-remove-duplicates:$IMAGE_TAG" postgres:18 | gzip -1 > "$directory/docker/images/images-$TARGET_ARCH.tar.gz"
           tar -czf "output/$package.tar.gz" -C "$RUNNER_TEMP" "$package"
           (
             cd output

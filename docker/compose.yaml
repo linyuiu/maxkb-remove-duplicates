@@ -1,7 +1,7 @@
 name: maxkb-remove-duplicates
 services:
   postgres:
-    image: postgres:16
+    image: postgres:18
     pull_policy: never
     environment:
       POSTGRES_USER: ${DB_USER:?Please configure DB_USER in .env}
@@ -12,7 +12,7 @@ services:
     volumes:
       - type: bind
         source: ./postgres
-        target: /var/lib/postgresql/data
+        target: /var/lib/postgresql
     healthcheck:
       test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -p "$$PGPORT"']
       interval: 5s

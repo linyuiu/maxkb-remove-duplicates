@@ -29,7 +29,7 @@ docker compose build
 docker compose up -d
 ```
 
-应用通过同一个 `docker/Dockerfile` 构建，缺少 `postgres:16` 时自动拉取。数据保存在 `WORK_DIR/maxkb-remove-duplicates/` 的 `postgres/`、`ingestion/`、`documents/`，默认位于 `/opt/maxkb-remove-duplicates/`。后续修改根目录 `.env`；使用上述符号链接时，它与工作目录配置是同一个文件。
+应用通过同一个 `docker/Dockerfile` 构建，缺少 `postgres:18` 时自动拉取。数据保存在 `WORK_DIR/maxkb-remove-duplicates/` 的 `postgres/`、`ingestion/`、`documents/`，默认位于 `/opt/maxkb-remove-duplicates/`。后续修改根目录 `.env`；使用上述符号链接时，它与工作目录配置是同一个文件。
 
 查看日志和停止服务也在源码根目录执行：
 
@@ -47,11 +47,13 @@ docker compose down
 - `architecture`：选择 `amd64`、`arm64` 或 `both`。
 - `image_tag`：镜像版本，默认 `v1.0.0`。
 
-构建完成后，从 **Artifacts** 直接下载对应架构的 `.tar.gz`，解压一次即可。包内的应用和 PostgreSQL 镜像由安装脚本自动加载。构建摘要提供安装包的 SHA-256 校验值，产物保留 14 天。
+构建完成后，从 **Artifacts** 直接下载对应架构的 `.tar.gz`，解压一次即可。安装包已包含应用和 PostgreSQL 18 镜像。安装脚本会从 `docker/images/` 加载，目标机器无需拉取这两个镜像。构建摘要提供安装包的 SHA-256 校验值，产物保留 14 天。
 
 ## 安装
 
 服务器需要 Docker Engine、Docker Compose V2 和 Bash。
+
+首次使用 PostgreSQL 18 安装包时，请使用空的服务目录。若已有旧版数据，可在模板中指定一个新的 `WORK_DIR`，例如 `/opt/maxkb-clean`。
 
 1. 编辑 `install/.env.example`，设置 `WORK_DIR`、数据库密码、访问地址等参数。`WORK_DIR` 默认 `/opt`，服务目录为 `/opt/maxkb-remove-duplicates`。执行安装的用户需要有权创建并写入服务目录，也可以填写其他路径。
 2. 在安装包目录执行：
@@ -66,7 +68,7 @@ bash install/install.sh
 WORK_DIR/maxkb-remove-duplicates/
 ├── .env
 ├── compose.yaml
-├── postgres/       # 数据库数据
+├── postgres/18/docker/  # PostgreSQL 18 数据
 ├── ingestion/      # 入库文件和解析产物
 └── documents/      # 待入库的本地文档
 ```
