@@ -576,7 +576,7 @@ onUnmounted(() => clearInterval(timer));
     <aside>
       <div class="brand">
         <div class="brand-icon">M</div>
-        <div>MaxKB <small>知识治理工作台</small></div>
+        <div>MaxKB <small>知识库治理平台</small></div>
       </div>
       <el-select v-model="feature" aria-label="切换功能" style="margin-bottom:16px"><el-option label="知识入库" value="ingestion"/><el-option label="重复片段" value="duplicates"/></el-select>
       <template v-if="feature==='ingestion'"><button v-for="(label,page) in ingestionPages" :key="page" :class="{active:ingestionPage===page}" @click="ingestionPage=String(page)">{{label}}</button></template>
