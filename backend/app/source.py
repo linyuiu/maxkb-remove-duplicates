@@ -77,8 +77,17 @@ def paragraph_data(row):
     )
 
 
+def document_scope(row_alias):
+    # Keep missing documents in scope so snapshot validation can detect dangling rows.
+    return f"""(%(include_inactive_documents)s OR NOT EXISTS (
+        SELECT 1 FROM document scope_document
+        WHERE scope_document.id = {row_alias}.document_id
+          AND scope_document.is_active IS FALSE
+    ))"""
+
+
 # LEFT JOIN is intentional: dangling records fail the snapshot rather than silently disappearing.
-SNAPSHOT_SQL = """
+SNAPSHOT_SQL = f"""
     SELECT e.id AS embedding_id, vector_dims(e.embedding) AS dims, vector_norm(e.embedding) AS norm,
            e.paragraph_id::text, e.document_id::text, e.knowledge_id::text,
            p.title, p.content, p.update_time, p.document_id::text AS p_document_id,
@@ -88,7 +97,8 @@ SNAPSHOT_SQL = """
     LEFT JOIN paragraph p ON p.id=e.paragraph_id
     LEFT JOIN document d ON d.id=e.document_id
     LEFT JOIN knowledge k ON k.id=e.knowledge_id
-    WHERE e.knowledge_id=ANY(%s::uuid[]) AND e.source_type='1'
+    WHERE e.knowledge_id=ANY(%(knowledge_ids)s::uuid[]) AND e.source_type='1'
+      AND {document_scope('e')}
     ORDER BY e.id
 """
 
@@ -128,7 +138,7 @@ def document_exists(source, target):
 
 
 # MaxKB encodes EMBEDDING (TaskType=1) in the last status character.
-READINESS_SQL = """
+READINESS_SQL = f"""
 WITH paragraphs AS (
  SELECT p.document_id, p.knowledge_id,
         CASE right(coalesce(p.status,''),1)
@@ -144,7 +154,8 @@ WITH paragraphs AS (
           ) THEN NULL ELSE '缺少正文向量' END
           ELSE '向量化未完成或状态未知'
         END AS reason
- FROM paragraph p WHERE p.knowledge_id=ANY(%s::uuid[])
+ FROM paragraph p WHERE p.knowledge_id=ANY(%(knowledge_ids)s::uuid[])
+   AND {document_scope('p')}
 ), issues AS (
  SELECT knowledge_id, document_id, reason, count(*) AS count
  FROM paragraphs WHERE reason IS NOT NULL
@@ -158,8 +169,11 @@ ORDER BY i.knowledge_id, i.document_id, i.reason LIMIT 20
 """
 
 
-def check_vector_readiness(conn, ids):
-    rows = conn.execute(READINESS_SQL, (ids,)).fetchall()
+def check_vector_readiness(conn, ids, include_inactive_documents=True):
+    rows = conn.execute(
+        READINESS_SQL,
+        {"knowledge_ids": ids, "include_inactive_documents": include_inactive_documents},
+    ).fetchall()
     if rows:
         details = '\n'.join(
             f"{r['knowledge_name'] or r['knowledge_id']} / "

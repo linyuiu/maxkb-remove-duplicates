@@ -365,6 +365,7 @@ class TaskBody(BaseModel):
     knowledge_ids: list[str] = Field(min_length=1)
     threshold: float = Field(default=0.9, ge=0, le=1, allow_inf_nan=False)
     exclude_same_document: bool = False
+    include_inactive_documents: bool = True
     batch_size: int = Field(default=32, ge=1, le=256)
     cron: str | None = None
     timezone: str = "Asia/Shanghai"
@@ -485,7 +486,8 @@ def estimate_task(task_id: str, body: EstimateRequest, user=Depends(auth)):
                 "cancelled",
             ]:
                 raise HTTPException(409, "此运行不能重新扫描")
-            config = {k: previous.config[k] for k in config}
+            previous_config = {"include_inactive_documents": True, **previous.config}
+            config = {key: previous_config[key] for key in config}
             config["retry_of"] = previous.id
         source = get(s, DataSource, config["source_id"])
         if not source.enabled:
@@ -539,11 +541,12 @@ def run_task(task_id: str, body: ConfirmScan, user=Depends(auth)):
             return serialize(get(s, Run, preview.run_id))
         if preview.expires_at <= now():
             raise HTTPException(409, "预估已过期，请重新统计")
-        if preview.config.get("retry_of"):
-            previous = get(s, Run, preview.config["retry_of"])
+        preview_config = {"include_inactive_documents": True, **preview.config}
+        if preview_config.get("retry_of"):
+            previous = get(s, Run, preview_config["retry_of"])
             if previous.state not in ["failed", "cancelled"]:
                 raise HTTPException(409, "原运行状态已变化")
-        elif preview.config != scan_config(task):
+        elif preview_config != scan_config(task):
             raise HTTPException(409, "任务配置已变化，请重新预估")
         if preview.summary["comparisons"] <= 0:
             raise HTTPException(400, "所选范围没有可比较的不同段落")
@@ -552,7 +555,7 @@ def run_task(task_id: str, body: ConfirmScan, user=Depends(auth)):
                 s,
                 task,
                 {
-                    **preview.config,
+                    **preview_config,
                     "estimate": preview.summary,
                     "estimate_id": preview.id,
                 },

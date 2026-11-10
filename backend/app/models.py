@@ -58,6 +58,9 @@ class Task(Base):
     knowledge_ids: Mapped[list] = mapped_column(JSON)
     threshold: Mapped[float] = mapped_column(Float, default=0.9)
     exclude_same_document: Mapped[bool] = mapped_column(Boolean, default=False)
+    include_inactive_documents: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true")
+    )
     batch_size: Mapped[int] = mapped_column(Integer, default=32)
     cron: Mapped[str | None] = mapped_column(String(100), nullable=True)
     timezone: Mapped[str] = mapped_column(String(80), default="Asia/Shanghai")

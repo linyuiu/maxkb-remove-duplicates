@@ -12,7 +12,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("DEDUP_DISPOSABLE_TEST_DB") != "1
 @pytest.fixture
 def source(connection):
     connection.exec_driver_sql('CREATE TABLE knowledge(id uuid primary key,name text)')
-    connection.exec_driver_sql('CREATE TABLE document(id uuid primary key,name text)')
+    connection.exec_driver_sql('CREATE TABLE document(id uuid primary key,name text,is_active boolean not null default true)')
     connection.exec_driver_sql('CREATE TABLE paragraph(id uuid primary key,knowledge_id uuid,document_id uuid,status text)')
     connection.exec_driver_sql('CREATE TABLE embedding(paragraph_id uuid,knowledge_id uuid,document_id uuid,source_type text,embedding text)')
     ids=[str(uuid.uuid4()) for _ in range(3)]
@@ -41,6 +41,18 @@ def test_readiness_states(source,status,has_vector,reason):
         assert '知识库 / 文档' in str(error.value)
     else:check_vector_readiness(conn,[k])
     check_vector_readiness(conn,[str(uuid.uuid4())])
+
+
+def test_inactive_documents_do_not_block_readiness_when_excluded(source):
+    conn, knowledge_id, document_id, paragraph_id = source
+    conn.execute('UPDATE document SET is_active=false WHERE id=%s', (document_id,))
+    conn.execute(
+        'INSERT INTO paragraph VALUES (%s,%s,%s,%s)',
+        (paragraph_id, knowledge_id, document_id, 'nnn1'),
+    )
+    with pytest.raises(ValueError, match='正在向量化'):
+        check_vector_readiness(conn, [knowledge_id])
+    check_vector_readiness(conn, [knowledge_id], include_inactive_documents=False)
 
 
 def test_problem_vectors_do_not_satisfy_body_readiness(source):

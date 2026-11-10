@@ -218,13 +218,18 @@ async function loadKnowledge() {
 async function openTask(row?: Row) {
   await action(async () => {
     taskForm.value = row
-      ? { ...row, knowledge_ids: [...row.knowledge_ids] }
+      ? {
+          ...row,
+          knowledge_ids: [...row.knowledge_ids],
+          include_inactive_documents: row.include_inactive_documents ?? true,
+        }
       : {
           name: "",
           source_id: "",
           knowledge_ids: [],
           threshold: 0.9,
           exclude_same_document: false,
+          include_inactive_documents: true,
           batch_size: 32,
           cron: "0 0 * * *",
           timezone: "Asia/Shanghai",
@@ -1429,7 +1434,13 @@ onUnmounted(() => clearInterval(timer));
         ><el-switch
           v-model="taskForm.exclude_same_document"
           active-text="排除同一文档内的比较" /></el-form-item
-      ><el-divider /><el-form-item
+      ><el-form-item>
+        <el-switch
+          v-model="taskForm.include_inactive_documents"
+          active-text="包含停用文档"
+        />
+      </el-form-item>
+      <el-divider /><el-form-item
         ><el-switch v-model="taskForm.enabled" active-text="启用定时扫描"
       /></el-form-item>
       <div class="form-row">

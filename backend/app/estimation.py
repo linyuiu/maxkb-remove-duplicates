@@ -5,13 +5,14 @@ import os
 from statistics import median
 from sqlalchemy import select
 from .models import Run
-from .source import connect, check_models, check_vector_readiness
+from .source import connect, check_models, check_vector_readiness, document_scope
 
-COUNT_SQL = """
+COUNT_SQL = f"""
 WITH p AS (
  SELECT knowledge_id,document_id,paragraph_id,count(*) AS n,
         min(vector_dims(embedding)) AS min_dims,max(vector_dims(embedding)) AS max_dims
- FROM embedding WHERE knowledge_id=ANY(%s::uuid[]) AND source_type='1'
+ FROM embedding e WHERE knowledge_id=ANY(%(knowledge_ids)s::uuid[]) AND source_type='1'
+   AND {document_scope('e')}
  GROUP BY knowledge_id,document_id,paragraph_id
 ), d AS (
  SELECT knowledge_id,document_id,sum(n) AS n FROM p GROUP BY knowledge_id,document_id
@@ -26,7 +27,7 @@ SELECT k.id::text AS id,k.name,k.workspace_id,coalesce(ks.chunks,0) AS chunks,
        ks.min_dims,ks.max_dims,coalesce(ks.paragraph_pairs,0) AS paragraph_pairs,
        coalesce(ds.document_pairs,0) AS document_pairs
 FROM knowledge k LEFT JOIN ks ON ks.knowledge_id=k.id LEFT JOIN ds ON ds.knowledge_id=k.id
-WHERE k.id=ANY(%s::uuid[]) ORDER BY k.name,k.id
+WHERE k.id=ANY(%(knowledge_ids)s::uuid[]) ORDER BY k.name,k.id
 """
 
 
@@ -45,6 +46,7 @@ def task_config(task):
             "knowledge_ids",
             "threshold",
             "exclude_same_document",
+            "include_inactive_documents",
             "batch_size",
         ]
     } | {"task_name": task.name}
@@ -73,11 +75,16 @@ def timing(comparisons, chunks, dimension, historical_rates):
 
 
 def estimate(source, config, session):
+    include_inactive_documents = config.get("include_inactive_documents", True)
     with connect(source) as connection:
         check_models(connection, config["knowledge_ids"])
-        check_vector_readiness(connection, config["knowledge_ids"])
+        check_vector_readiness(connection, config["knowledge_ids"], include_inactive_documents)
         rows = connection.execute(
-            COUNT_SQL, (config["knowledge_ids"], config["knowledge_ids"])
+            COUNT_SQL,
+            {
+                "knowledge_ids": config["knowledge_ids"],
+                "include_inactive_documents": include_inactive_documents,
+            },
         ).fetchall()
     dimensions = {
         int(r[k]) for r in rows for k in ["min_dims", "max_dims"] if r[k] is not None
@@ -107,6 +114,8 @@ def estimate(source, config, session):
             run.config.get(k) != config[k]
             for k in ["source_id", "exclude_same_document", "batch_size", "threshold"]
         ):
+            continue
+        if run.config.get("include_inactive_documents", True) != include_inactive_documents:
             continue
         if run.config.get("actual_dimensions") != dims or not run.finished_at:
             continue

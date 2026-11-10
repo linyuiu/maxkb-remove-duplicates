@@ -8,7 +8,9 @@ from sqlalchemy import select, update, func, text
 from sqlalchemy.dialects.postgresql import insert
 from .db import transaction
 from .models import Run, Pair, ParagraphSnapshot, DataSource, now
-from .source import connect, check_models, SNAPSHOT_SQL, paragraph_data, check_vector_readiness
+from .source import (
+    SNAPSHOT_SQL, check_models, check_vector_readiness, connect, document_scope, paragraph_data,
+)
 
 LEASE_SECONDS = 180
 
@@ -143,11 +145,18 @@ def take_snapshot(run_id, token, conn, control=None):
             raise ValueError("已有部分数据的运行不可接入新源快照，请创建重试运行")
         config = run.config.copy()
     check_models(conn, config["knowledge_ids"])
-    check_vector_readiness(conn, config["knowledge_ids"])
+    include_inactive_documents = config.get("include_inactive_documents", True)
+    check_vector_readiness(conn, config["knowledge_ids"], include_inactive_documents)
     dimension, seen = None, set()
     group_counts = {}
     with conn.cursor(name="dedup_paragraph_snapshot") as cursor:
-        cursor.execute(SNAPSHOT_SQL, (config["knowledge_ids"],))
+        cursor.execute(
+            SNAPSHOT_SQL,
+            {
+                "knowledge_ids": config["knowledge_ids"],
+                "include_inactive_documents": include_inactive_documents,
+            },
+        )
         while rows := cursor.fetchmany(500):
             if control:
                 control.check()
@@ -201,13 +210,14 @@ def take_snapshot(run_id, token, conn, control=None):
 
 # LIMIT is used only to choose anchor batches, never to truncate candidate matches.
 # Both sides are filtered by the selected knowledge IDs; they need not be equal.
-ANCHORS_SQL = """
-SELECT id FROM embedding
+ANCHORS_SQL = f"""
+SELECT id FROM embedding e
 WHERE knowledge_id=ANY(%(knowledge_ids)s::uuid[]) AND source_type='1'
+  AND {document_scope('e')}
   AND (%(start)s::text IS NULL OR id>%(start)s)
 ORDER BY id LIMIT %(batch_size)s
 """
-COMPARE_SQL = """
+COMPARE_SQL = f"""
 WITH scores AS MATERIALIZED (
     SELECT LEAST(a.paragraph_id::text,b.paragraph_id::text) AS left_id,
            GREATEST(a.paragraph_id::text,b.paragraph_id::text) AS right_id,
@@ -217,6 +227,7 @@ WITH scores AS MATERIALIZED (
     FROM embedding a JOIN embedding b ON b.id<a.id
     WHERE a.knowledge_id=ANY(%(knowledge_ids)s::uuid[]) AND a.source_type='1'
       AND b.knowledge_id=ANY(%(knowledge_ids)s::uuid[]) AND b.source_type='1'
+      AND {document_scope('a')} AND {document_scope('b')}
       AND (%(start)s::text IS NULL OR a.id>%(start)s) AND a.id<=%(end)s
       AND a.paragraph_id<>b.paragraph_id
       AND (NOT %(exclude_doc)s OR a.document_id<>b.document_id)
@@ -239,6 +250,7 @@ def compare_batch(run_id, token, conn, after=None, control=None):
         batch_size=config["batch_size"],
         threshold=config["threshold"],
         exclude_doc=config["exclude_same_document"],
+        include_inactive_documents=config.get("include_inactive_documents", True),
     )
     anchors = conn.execute(ANCHORS_SQL, params).fetchall()
     if not anchors:

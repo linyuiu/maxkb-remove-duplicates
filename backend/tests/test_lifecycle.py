@@ -67,7 +67,7 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
         ).scalar()
         assert (
             conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
-            == "0005"
+            == "0006"
         )
     dsn = "host=127.0.0.1 port=15439 dbname=postgres user=postgres password=postgres sslmode=disable"
     model = str(uuid4())
@@ -81,7 +81,7 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
             "CREATE TABLE knowledge(id uuid primary key,name text,workspace_id text,embedding_model_id uuid)"
         )
         c.execute(
-            "CREATE TABLE document(id uuid primary key,name text,knowledge_id uuid)"
+            "CREATE TABLE document(id uuid primary key,name text,knowledge_id uuid,is_active boolean not null default true)"
         )
         c.execute(
             "CREATE TABLE paragraph(id uuid primary key,title text,content text,document_id uuid,knowledge_id uuid,update_time timestamptz default now(),position int default 1,status text default 'nnn2')"
@@ -116,6 +116,7 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
                     "1",
                 ),
             )
+        c.execute("UPDATE document SET is_active=false WHERE id=%s", (docs[3],))
         c.execute(
             "INSERT INTO embedding SELECT %s,embedding,paragraph_id,document_id,knowledge_id,source_type FROM embedding WHERE id=%s",
             ("duplicate", "e0"),
@@ -134,7 +135,8 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
         task = Task(
             name="test",
             source_id=source.id,
-            knowledge_ids=kids[:2],
+            knowledge_ids=kids,
+            include_inactive_documents=False,
             threshold=0.9,
             batch_size=1,
         )
@@ -147,13 +149,14 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
     scheduled = main.TaskBody(
         name="scheduled",
         source_id=sid,
-        knowledge_ids=kids[:2],
+        knowledge_ids=kids,
         enabled=True,
         cron="0 0 * * *",
     )
     with pytest.raises(HTTPException):
         main.create_task(scheduled, user)
     schedule_preview = main.preview_schedule(scheduled, user=user)
+    assert schedule_preview["chunks"] == 5
     with sessions() as s:
         assert s.scalar(select(func.count()).select_from(Task)) == 1
         assert s.scalar(select(func.count()).select_from(Run)) == 0
@@ -182,7 +185,7 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
         and preview["paragraphs"] == 3
         and preview["documents"] == 3
     )
-    assert preview["comparisons"] == 5 and len(preview["knowledge"]) == 2
+    assert preview["comparisons"] == 5 and len(preview["knowledge"]) == 3
     with sessions() as s:
         assert s.scalar(select(func.count()).select_from(Run)) == 0
     from app.models import ScanEstimate

@@ -10,7 +10,7 @@ import random
 import subprocess
 import os
 import pytest
-from app.scanning import COMPARE_SQL
+from app.scanning import ANCHORS_SQL, COMPARE_SQL
 
 
 def oracle(rows, threshold, exclude_doc):
@@ -31,12 +31,13 @@ def oracle(rows, threshold, exclude_doc):
 
 
 @pytest.mark.parametrize("seed", [7, 42, 103])
+@pytest.mark.parametrize("include_inactive_documents", [True, False])
 @pytest.mark.parametrize(
     "threshold,exclude_doc,batch_size",
     [(0, False, 1), (0.8, False, 3), (0.8, True, 2), (1, False, 4)],
 )
 def test_production_sql_matches_independent_all_pairs(
-    threshold, exclude_doc, batch_size, seed
+    threshold, exclude_doc, batch_size, seed, include_inactive_documents
 ):
     harness = Path(__file__).parent / "sql"
     if not (
@@ -65,8 +66,12 @@ def test_production_sql_matches_independent_all_pairs(
         )
         for i, v in enumerate([[1, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0], [-1, 0, 0, 0]])
     ]
+    inactive_documents = ["d1", "special0"]
     payload = dict(
+        anchors_sql=ANCHORS_SQL,
         sql=COMPARE_SQL,
+        inactive_documents=inactive_documents,
+        include_inactive_documents=include_inactive_documents,
         rows=rows,
         threshold=threshold,
         exclude_doc=exclude_doc,
@@ -82,7 +87,11 @@ def test_production_sql_matches_independent_all_pairs(
     actual = {
         (p["left_id"], p["right_id"]): p["similarity"] for p in json.loads(out.stdout)
     }
-    expected = oracle(rows, threshold, exclude_doc)
+    expected_rows = [
+        row for row in rows
+        if include_inactive_documents or row["document_id"] not in inactive_documents
+    ]
+    expected = oracle(expected_rows, threshold, exclude_doc)
     assert actual.keys() == expected.keys()
     for key in actual:
         assert actual[key] == pytest.approx(expected[key], abs=1e-6)
