@@ -63,12 +63,6 @@ p {
   line-height: 1.8;
   color: #404040;
 }
-.eyebrow {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 2.4px;
-  color: #404040;
-}
 .muted {
   color: #404040;
 }
@@ -214,12 +208,7 @@ aside .new-scan span {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.recent-runs p {
-  padding-left: 12px;
-  font-size: 12px;
-}
-.recent-dot,
-.status-dot {
+.recent-dot {
   display: inline-block;
   width: 5px;
   height: 5px;
@@ -227,8 +216,7 @@ aside .new-scan span {
   background: #b4c0c6;
   flex-shrink: 0;
 }
-.recent-dot.succeeded,
-.status-dot {
+.recent-dot.succeeded {
   background: #71a796;
 }
 .recent-dot.running {
@@ -236,21 +224,6 @@ aside .new-scan span {
 }
 .recent-dot.failed {
   background: #c8949b;
-}
-.aside-bottom {
-  margin-top: auto;
-  padding: 18px 12px 0;
-  line-height: 2;
-  border-top: 1px solid #ffffff70;
-  font-size: 12px;
-  color: #404040;
-}
-.aside-bottom small {
-  font-size: 12px;
-  color: #404040;
-}
-.status-dot {
-  margin-right: 7px;
 }
 .workspace {
   width: 100%;
@@ -325,10 +298,8 @@ header > div {
   gap: 20px;
   margin: 7px 0 34px;
 }
-.page-heading p {
-  font-size: 12px;
+.page-heading h1 {
   margin: 0;
-  max-width: 650px;
 }
 .el-card {
   border: 1px solid var(--line) !important;
@@ -814,9 +785,6 @@ pre {
   .page-heading h1 {
     font-size: 24px;
   }
-  .page-heading p {
-    font-size: 12px;
-  }
   .el-card__body {
     padding: 15px;
   }
@@ -865,7 +833,6 @@ pre {
   display: none;
 }
 .muted,
-.eyebrow,
 .nav-label {
   color: #525252;
 }
@@ -873,10 +840,6 @@ pre {
   color: #202020;
   font-size: 14px;
   line-height: 1.9;
-}
-.page-heading p {
-  color: #404040;
-  font-size: 14px;
 }
 .el-table {
   --el-table-text-color: #262626;
@@ -937,9 +900,6 @@ h4,
   color: #262626;
 }
 @media (max-width: 650px) {
-  .page-heading p {
-    font-size: 13px;
-  }
   .stats span {
     font-size: 12px;
   }

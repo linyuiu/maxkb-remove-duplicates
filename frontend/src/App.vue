@@ -542,8 +542,7 @@ onUnmounted(() => clearInterval(timer));
 <template>
   <div v-if="!ready" class="loading">正在连接系统…</div>
   <main v-else-if="!user" class="login-shell">
-    <el-card class="login-card"
-      ><span class="eyebrow">WORKSPACE ACCESS</span>
+    <el-card class="login-card">
       <h2>登录治理工作台</h2>
       <el-form label-position="top" @submit.prevent="login"
         ><el-form-item label="用户名"
@@ -591,7 +590,6 @@ onUnmounted(() => clearInterval(timer));
       >
         <span>＋</span> 新建扫描
       </button>
-      <div class="nav-label">工作台</div>
       <button
         :class="{ active: tab === 'runs' }"
         @click="
@@ -622,7 +620,7 @@ onUnmounted(() => clearInterval(timer));
       >
         ≡ <span>操作历史</span>
       </button>
-      <div class="recent-runs">
+      <div v-if="runs.length" class="recent-runs">
         <div class="nav-label">最近扫描</div>
         <button
           v-for="run in runs.slice(0, 5)"
@@ -635,14 +633,8 @@ onUnmounted(() => clearInterval(timer));
           <span class="recent-dot" :class="run.state"></span
           ><span>{{ run.config.task_name }}</span>
         </button>
-        <p v-if="!runs.length" class="muted small">扫描记录会显示在这里</p>
       </div>
       </template>
-      <div class="aside-bottom">
-        <span class="status-dot"></span> {{feature==='ingestion'?'文档解析与入库':'精确余弦扫描'}}<br /><small
-          >{{feature==='ingestion'?'任务状态与来源记录持久保存':'源数据库只读 · 快照持久化'}}</small
-        >
-      </div>
     </aside>
     <div class="workspace">
       <header>
@@ -700,11 +692,7 @@ onUnmounted(() => clearInterval(timer));
         <template v-if="feature==='duplicates'">
         <template v-if="tab === 'sources'"
           ><div class="page-heading">
-            <div>
-              <span class="eyebrow">CONNECTIONS</span>
-              <h1>数据源</h1>
-              <p>连接 MaxKB 数据库，为扫描任务提供可复用的数据范围。</p>
-            </div>
+            <h1>数据源</h1>
             <el-button type="primary" @click="openSource()"
               >＋ 添加数据源</el-button
             >
@@ -743,11 +731,7 @@ onUnmounted(() => clearInterval(timer));
 
         <template v-else-if="tab === 'tasks'"
           ><div class="page-heading">
-            <div>
-              <span class="eyebrow">SCAN CONFIGURATION</span>
-              <h1>扫描任务</h1>
-              <p>选择知识库、设置阈值，手动执行或按计划扫描。</p>
-            </div>
+            <h1>扫描任务</h1>
             <el-button type="primary" @click="openTask()"
               >＋ 新建任务</el-button
             >
@@ -803,11 +787,7 @@ onUnmounted(() => clearInterval(timer));
 
         <template v-else-if="tab === 'runs' && !selectedRun"
           ><div class="page-heading">
-            <div>
-              <span class="eyebrow">SCAN ACTIVITY</span>
-              <h1>扫描记录</h1>
-              <p>每次扫描独立保存，随时回看完整段落与处理进度。</p>
-            </div>
+            <h1>扫描记录</h1>
             <el-button @click="action(refresh)">刷新</el-button>
           </div>
           <div class="stats">
@@ -904,7 +884,6 @@ onUnmounted(() => clearInterval(timer));
               ></el-table
             ></el-card
           >
-          <p class="muted small">每页 50 次运行 · 扫描进行时每 5 秒自动刷新</p>
           <div class="history-pager">
             <el-button
               :disabled="runPage === 1"
@@ -931,12 +910,10 @@ onUnmounted(() => clearInterval(timer));
           >
           <div class="page-heading">
             <div>
-              <span class="eyebrow">SIMILARITY REVIEW</span>
               <h1>
                 {{ selectedRun.config.task_name }}
                 <el-tag>{{ stateLabels[selectedRun.state] }}</el-tag>
               </h1>
-              <p>相似度取两段落中最相似的一对 chunk，展示两侧完整段落。</p>
             </div>
             <el-button @click="action(loadPairs)">刷新结果</el-button>
           </div>
@@ -982,6 +959,8 @@ onUnmounted(() => clearInterval(timer));
               </el-option> </el-select
             ><el-input-number
               v-model="filter.min_score"
+              aria-label="最低相似度"
+              title="最低相似度"
               :min="0"
               :max="1"
               :step="0.01"
@@ -1007,10 +986,9 @@ onUnmounted(() => clearInterval(timer));
           <article v-for="pair in results" :key="pair.id" class="pair">
             <div class="pair-heading">
               <div>
-                <span class="score"
+                <span class="score" title="最高相似度"
                   >{{ (pair.similarity * 100).toFixed(2) }}%</span
                 >
-                <span class="muted">最高 chunk 相似度</span>
               </div>
               <div>
                 <el-tag>{{ stateLabels[pair.status] }}</el-tag
@@ -1090,15 +1068,12 @@ onUnmounted(() => clearInterval(timer));
 
         <template v-else-if="tab === 'operations'"
           ><div class="page-heading">
-            <div>
-              <span class="eyebrow">CHANGE HISTORY</span>
-              <h1>操作历史</h1>
-              <p>保留修改前、拟修改、源系统实际文本及每次操作状态。</p>
-            </div>
+            <h1>操作历史</h1>
             <el-button @click="showOperations">刷新</el-button>
           </div>
           <el-alert
-            title="修改、删除均保存操作记录；执行结果不明确时点击核实，仅回读源系统，不会重发写请求。"
+            v-if="operations.some((operation) => ['executing', 'unknown'].includes(operation.state))"
+            title="核实结果只读取源系统状态。"
             type="info"
             :closable="false"
           /><el-card
@@ -1265,7 +1240,7 @@ onUnmounted(() => clearInterval(timer));
         :closable="false"
       />
       <p class="small muted">
-        耗时为估算范围，不含排队时间；实际受数据库负载、命中结果数量等影响。统计只读取数量，不进行相似扫描。确认前后数据可能变化，正式扫描以新的数据库快照为准。预估有效至
+        预计耗时不含排队。预估有效至
         {{ date(scanEstimate.expires_at) }}。
       </p>
       <el-alert
@@ -1370,7 +1345,7 @@ onUnmounted(() => clearInterval(timer));
           autocomplete="new-password"
       /></el-form-item>
       <p class="small muted">
-        Key 仅在后端加密保存；更换 API 地址时请重新填写。
+        更换 API 地址时，请重新填写 Bearer Key。
       </p>
       <el-switch
         v-model="sourceForm.enabled"
@@ -1415,8 +1390,8 @@ onUnmounted(() => clearInterval(timer));
             :value="k.id"
             :label="`${k.name} · ${k.workspace_id} · ${k.model_name || '未配置模型'}`" /></el-select
       ></el-form-item>
-      <p class="small muted">
-        所选知识库组成比较范围。多库比较需使用同一向量模型。
+      <p v-if="taskForm.knowledge_ids.length > 1" class="small muted">
+        多库比较需使用同一向量模型。
       </p>
       <div class="form-row">
         <el-form-item label="相似度阈值"
