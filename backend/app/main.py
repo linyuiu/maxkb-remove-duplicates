@@ -26,7 +26,9 @@ from .models import (
 )
 from .security import passwords, digest, encrypt, decrypt, cipher, content_hash
 from .source import (
+    check_models,
     list_knowledge,
+    workspace_names,
     validated_ids,
     current_paragraph,
     connect,
@@ -116,18 +118,31 @@ def auth(request: Request):
 
 def get(s, model, key, *, for_update=False):
     obj = s.get(model, key, with_for_update=for_update)
-    if not obj:
-        raise HTTPException(404, "记录不存在")
+    if not obj or (model is DataSource and obj.deleted_at is not None):
+        raise HTTPException(404, "数据源不存在" if model is DataSource else "记录不存在")
     return obj
 
 
+def get_task(s, task_id, *, for_update=False):
+    task = get(s, Task, task_id, for_update=for_update)
+    if task.deleted_at is not None:
+        raise HTTPException(404, "任务不存在")
+    return task
+
+
 def serialize(obj):
-    return {
+    data = {
         c.name: getattr(obj, c.name)
         for c in obj.__table__.columns
         if c.name
-        not in {"connection", "password_hash", "token", "token_hash", "api_key"}
+        not in {"connection", "password_hash", "token", "token_hash", "api_key", "batch_key", "batch_delta"}
     }
+    if isinstance(obj,Run):
+        data["config"] = {**data["config"], "processed_comparisons":obj.comparisons_done,
+                          "actual_comparisons":obj.comparisons_total}
+        if obj.timing:
+            data["config"]["timings"] = obj.timing.data
+    return data
 
 
 class LoginBody(BaseModel):
@@ -245,7 +260,9 @@ class SourceBody(BaseModel):
 
 def source_target_in_use(source_id):
     return or_(
-        select(Task.id).where(Task.source_id == source_id).exists(),
+        select(Task.id).where(
+            Task.source_id == source_id, Task.deleted_at.is_(None)
+        ).exists(),
         select(Run.id).where(Run.config["source_id"].as_string() == source_id).exists(),
         select(Operation.id).where(
             Operation.target["source_id"].as_string() == source_id
@@ -278,6 +295,7 @@ def connection_info(body):
 def sources(s=Depends(db), user=Depends(auth)):
     rows = s.execute(
         select(DataSource, source_target_in_use(DataSource.id))
+        .where(DataSource.deleted_at.is_(None))
         .order_by(DataSource.created_at.desc())
     )
     return [source_view(source, target_in_use) for source, target_in_use in rows]
@@ -336,6 +354,36 @@ def edit_source(source_id: str, body: SourceBody, user=Depends(auth)):
         return source_view(source, target_in_use)
 
 
+@app.delete("/api/sources/{source_id}")
+def delete_source(source_id: str, user=Depends(auth)):
+    with transaction() as s:
+        source = s.get(DataSource, source_id, with_for_update=True)
+        if not source:
+            raise HTTPException(404, "数据源不存在")
+        if source.deleted_at is not None:
+            return {"ok": True}
+        if s.scalar(select(Task.id).where(
+            Task.source_id == source_id, Task.deleted_at.is_(None)
+        ).limit(1)):
+            raise HTTPException(409, "该数据源仍有关联扫描任务，请先删除相关任务")
+        if s.scalar(select(Run.id).where(
+            Run.config["source_id"].as_string() == source_id,
+            Run.state.in_(["queued", "running"]),
+        ).limit(1)):
+            raise HTTPException(409, "该数据源仍有排队或执行中的扫描，请等待结束或取消后再删除")
+        if s.scalar(select(Operation.id).where(
+            Operation.target["source_id"].as_string() == source_id,
+            Operation.state.in_(["executing", "unknown"]),
+        ).limit(1)):
+            raise HTTPException(409, "该数据源仍有执行中或待核实的操作，请先处理后再删除")
+        source.enabled = False
+        source.deleted_at = now()
+        source.connection = ""
+        source.api_base_url = ""
+        source.api_key = ""
+    return {"ok": True}
+
+
 @app.get("/api/sources/{source_id}/knowledge")
 def knowledge(source_id: str, s=Depends(db), user=Depends(auth)):
     source = get(s, DataSource, source_id)
@@ -366,7 +414,7 @@ class TaskBody(BaseModel):
     threshold: float = Field(default=0.9, ge=0, le=1, allow_inf_nan=False)
     exclude_same_document: bool = False
     include_inactive_documents: bool = True
-    batch_size: int = Field(default=32, ge=1, le=256)
+    batch_size: int = Field(default=1024, ge=1, le=4096)
     cron: str | None = None
     timezone: str = "Asia/Shanghai"
     enabled: bool = False
@@ -389,7 +437,12 @@ def task_values(body):
 
 @app.get("/api/tasks")
 def tasks(s=Depends(db), user=Depends(auth)):
-    return [serialize(t) for t in s.scalars(select(Task).order_by(Task.name))]
+    ordered = (
+        select(Task)
+        .where(Task.deleted_at.is_(None))
+        .order_by(Task.created_at.desc().nulls_last(), Task.name, Task.id)
+    )
+    return [serialize(t) for t in s.scalars(ordered)]
 
 
 def require_schedule_confirmation(body, values, user, task_id=None):
@@ -409,7 +462,7 @@ def preview_schedule(body: TaskBody, task_id: str | None = None, user=Depends(au
     values = task_values(body)
     with Session() as s:
         if task_id:
-            get(s, Task, task_id)
+            get_task(s, task_id)
         source = get(s, DataSource, body.source_id)
         if not source.connection:raise HTTPException(400,"此连接仅配置 API，扫描需要数据库连接")
         if not source.enabled:
@@ -432,13 +485,36 @@ def preview_schedule(body: TaskBody, task_id: str | None = None, user=Depends(au
     }
 
 
+def validate_task_model_scope(source_id, knowledge_ids, task_id=None):
+    with Session() as s:
+        if task_id:
+            get_task(s, task_id)
+        source = get(s, DataSource, source_id)
+        connection = source.connection
+        if not connection:
+            raise HTTPException(400, "此连接仅配置 API，扫描需要数据库连接")
+        s.expunge(source)
+    try:
+        with connect(source) as conn:
+            check_models(conn, knowledge_ids)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, "无法校验知识库模型，请检查数据源连接和权限") from exc
+    return connection
+
+
 @app.post("/api/tasks")
 def create_task(body: TaskBody, user=Depends(auth)):
     values = task_values(body)
     require_schedule_confirmation(body, values, user)
+    connection = validate_task_model_scope(
+        body.source_id, values["knowledge_ids"]
+    )
     with transaction() as s:
         source = get(s, DataSource, body.source_id, for_update=True)
-        if not source.connection:raise HTTPException(400,"此连接仅配置 API，扫描需要数据库连接")
+        if source.connection != connection:
+            raise HTTPException(409, "数据源连接已变更，请重新选择知识库")
         if body.enabled and not source.enabled:
             raise HTTPException(409, "数据源已停用")
         task = Task(**values)
@@ -451,19 +527,47 @@ def create_task(body: TaskBody, user=Depends(auth)):
 def edit_task(task_id: str, body: TaskBody, user=Depends(auth)):
     values = task_values(body)
     require_schedule_confirmation(body, values, user, task_id)
+    connection = validate_task_model_scope(
+        body.source_id, values["knowledge_ids"], task_id
+    )
     with transaction() as s:
-        task = s.execute(
-            select(Task).where(Task.id == task_id).with_for_update()
-        ).scalar_one_or_none()
-        if not task:
-            raise HTTPException(404, "任务不存在")
+        task = get_task(s, task_id, for_update=True)
         source = get(s, DataSource, body.source_id, for_update=True)
-        if not source.connection:raise HTTPException(400,"此连接仅配置 API，扫描需要数据库连接")
+        if source.connection != connection:
+            raise HTTPException(409, "数据源连接已变更，请重新选择知识库")
         if body.enabled and not source.enabled:
             raise HTTPException(409, "数据源已停用")
         for key, value in values.items():
             setattr(task, key, value)
         return serialize(task)
+
+
+@app.delete("/api/tasks/{task_id}")
+def delete_task(task_id: str, user=Depends(auth)):
+    with transaction() as s:
+        task = get(s, Task, task_id, for_update=True)
+        if task.deleted_at is not None:
+            return {"ok": True}
+        active = s.scalars(
+            select(Run)
+            .where(Run.task_id == task_id, Run.state.in_(["queued", "running"]))
+            .order_by(Run.id)
+            .with_for_update(key_share=True)
+        ).all()
+        for run in active:
+            if run.state == "queued":
+                run.state, run.finished_at = "cancelled", now()
+            else:
+                run.cancel_requested = True
+        task.enabled = False
+        task.next_fire = None
+        task.deleted_at = now()
+        s.execute(
+            delete(ScanEstimate).where(
+                ScanEstimate.task_id == task_id, ScanEstimate.run_id.is_(None)
+            )
+        )
+    return {"ok": True}
 
 
 class EstimateRequest(BaseModel):
@@ -477,7 +581,7 @@ class ConfirmScan(BaseModel):
 @app.post("/api/tasks/{task_id}/estimate")
 def estimate_task(task_id: str, body: EstimateRequest, user=Depends(auth)):
     with Session() as s:
-        task = get(s, Task, task_id)
+        task = get_task(s, task_id)
         config = scan_config(task)
         if body.retry_run_id:
             previous = get(s, Run, body.retry_run_id)
@@ -505,6 +609,7 @@ def estimate_task(task_id: str, body: EstimateRequest, user=Depends(auth)):
         except Exception:
             raise HTTPException(502, "统计失败，请检查数据库连接、权限和查询超时")
     with transaction() as s:
+        get_task(s, task_id, for_update=True)
         preview = ScanEstimate(
             task_id=task_id,
             user_id=user.id,
@@ -525,11 +630,7 @@ def estimate_task(task_id: str, body: EstimateRequest, user=Depends(auth)):
 @app.post("/api/tasks/{task_id}/run")
 def run_task(task_id: str, body: ConfirmScan, user=Depends(auth)):
     with transaction() as s:
-        task = s.execute(
-            select(Task).where(Task.id == task_id).with_for_update()
-        ).scalar_one_or_none()
-        if not task:
-            raise HTTPException(404, "任务不存在")
+        task = get_task(s, task_id, for_update=True)
         preview = s.execute(
             select(ScanEstimate)
             .where(ScanEstimate.id == body.estimate_id)
@@ -587,7 +688,7 @@ def delete_run(run_id: str, user=Depends(auth)):
         run = get(s, Run, run_id)
         # Match scan confirmation's task -> run lock order.
         s.execute(select(Task.id).where(Task.id == run.task_id).with_for_update()).scalar_one()
-        run = s.execute(select(Run).where(Run.id == run_id).with_for_update()
+        run = s.execute(select(Run).where(Run.id == run_id).with_for_update(key_share=True)
                         .execution_options(populate_existing=True)).scalar_one_or_none()
         if not run:
             raise HTTPException(404, "扫描记录不存在")
@@ -617,7 +718,7 @@ def delete_run(run_id: str, user=Depends(auth)):
 def cancel(run_id: str, user=Depends(auth)):
     with transaction() as s:
         r = s.execute(
-            select(Run).where(Run.id == run_id).with_for_update()
+            select(Run).where(Run.id == run_id).with_for_update(key_share=True)
         ).scalar_one_or_none()
         if not r:
             raise HTTPException(404, "运行不存在")
@@ -641,6 +742,19 @@ def resume(run_id: str, body: ConfirmScan, user=Depends(auth)):
     return run_task(task_id, body, user)
 
 
+@app.get("/api/runs/{run_id}/workspaces")
+def run_workspaces(run_id: str, user=Depends(auth)):
+    with Session() as s:
+        run = get(s, Run, run_id)
+        source = get(s, DataSource, run.config["source_id"])
+        s.expunge(source)
+    try:
+        with connect(source) as conn:
+            return workspace_names(conn)
+    except Exception:
+        raise HTTPException(502, "读取工作空间名称失败")
+
+
 @app.get("/api/runs/{run_id}/knowledge")
 def run_knowledge(run_id: str, s=Depends(db), user=Depends(auth)):
     get(s, Run, run_id)
@@ -650,6 +764,7 @@ def run_knowledge(run_id: str, s=Depends(db), user=Depends(auth)):
             data["knowledge_id"].as_string().label("id"),
             data["knowledge_name"].as_string().label("name"),
             data["workspace_id"].as_string().label("workspace_id"),
+            data["workspace_name"].as_string().label("workspace_name"),
         )
         .where(ParagraphSnapshot.run_id == run_id)
         .distinct()

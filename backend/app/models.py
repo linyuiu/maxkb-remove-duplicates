@@ -4,6 +4,7 @@ from sqlalchemy import (
     String,
     Text,
     Integer,
+    BigInteger,
     Float,
     Boolean,
     DateTime,
@@ -13,7 +14,7 @@ from sqlalchemy import (
     Index,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
 
 
@@ -48,6 +49,9 @@ class DataSource(Base):
     api_key: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class Task(Base):
@@ -61,7 +65,7 @@ class Task(Base):
     include_inactive_documents: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("true")
     )
-    batch_size: Mapped[int] = mapped_column(Integer, default=32)
+    batch_size: Mapped[int] = mapped_column(Integer, default=1024)
     cron: Mapped[str | None] = mapped_column(String(100), nullable=True)
     timezone: Mapped[str] = mapped_column(String(80), default="Asia/Shanghai")
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -69,6 +73,12 @@ class Task(Base):
         DateTime(timezone=True), nullable=True
     )
     skipped_fires: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=now
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class Run(Base):
@@ -94,7 +104,16 @@ class Run(Base):
     cursor: Mapped[int] = mapped_column(Integer, default=0)
     total: Mapped[int] = mapped_column(Integer, default=0)
     processed: Mapped[int] = mapped_column(Integer, default=0)
-    pair_count: Mapped[int] = mapped_column(Integer, default=0)
+    pair_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    comparisons_total: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    comparisons_done: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    batch_seq: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    batch_key: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    batch_delta: Mapped[dict] = mapped_column(JSON, default=dict, server_default=text("'{}'::json"))
+    result_submitted: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    result_improved: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    result_unchanged: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    timing = relationship("ScanTiming", uselist=False, lazy="selectin", viewonly=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     __table_args__ = (
         Index(
@@ -104,6 +123,12 @@ class Run(Base):
             postgresql_where=text("state IN ('queued','running')"),
         ),
     )
+
+
+class ScanTiming(Base):
+    __tablename__ = "scan_timings"
+    run_id: Mapped[str] = mapped_column(ForeignKey("scan_runs.id", ondelete="CASCADE"), primary_key=True)
+    data: Mapped[dict] = mapped_column(JSON)
 
 
 class ParagraphSnapshot(Base):

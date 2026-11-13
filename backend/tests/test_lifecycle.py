@@ -7,9 +7,10 @@ Never points at a production database. Ports and databases are hardcoded test-on
 
 import os
 from pathlib import Path
+from functools import partial
 from uuid import uuid4
 import pytest
-from sqlalchemy import create_engine, select, func
+from sqlalchemy import create_engine, select, func, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 import psycopg
@@ -23,6 +24,10 @@ pytestmark = pytest.mark.skipif(
 
 def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
     monkeypatch.setenv("INGESTION_DATA_DIR",str(tmp_path/"ingestion"))
+    # PGlite multiplexes client connections over one backend session.
+    monkeypatch.setattr(
+        psycopg, "connect", partial(psycopg.connect, prepare_threshold=None)
+    )
     from app import db, main
     from app.models import (
         User,
@@ -34,12 +39,14 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
         ParagraphSnapshot,
     )
     from app.security import encrypt, passwords
-    from app.scanning import claim, take_snapshot, compare_batch, fenced, Stopped
+    from app.source import list_knowledge
+    from app.scanning import claim, take_snapshot, compare_snapshot, save_matches, fenced, Stopped
+    from app.matrix import VectorStore, compare
 
     monkeypatch.setenv("ENCRYPTION_KEY", Fernet.generate_key().decode())
     engine = create_engine(
         "postgresql+psycopg://postgres:postgres@127.0.0.1:15438/postgres?sslmode=disable",
-        pool_size=1,
+        pool_size=5,
         max_overflow=0,
     )
     sessions = sessionmaker(engine, expire_on_commit=False)
@@ -67,10 +74,11 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
         ).scalar()
         assert (
             conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
-            == "0006"
+            == "0010"
         )
     dsn = "host=127.0.0.1 port=15439 dbname=postgres user=postgres password=postgres sslmode=disable"
     model = str(uuid4())
+    other_model, other_knowledge = str(uuid4()), str(uuid4())
     kids = [str(uuid4()) for _ in range(3)]
     docs = [str(uuid4()) for _ in range(4)]
     pids = [str(uuid4()) for _ in range(4)]
@@ -95,6 +103,11 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
                 "INSERT INTO knowledge VALUES (%s,%s,%s,%s)",
                 (k, "knowledge" + str(i), "default", model),
             )
+        c.execute("INSERT INTO model VALUES (%s,%s)", (other_model, "test"))
+        c.execute(
+            "INSERT INTO knowledge VALUES (%s,%s,%s,%s)",
+            (other_knowledge, "other knowledge", "default", other_model),
+        )
         for i in range(4):
             k = kids[0 if i == 0 else 1 if i in [1, 2] else 2]
             c.execute(
@@ -109,7 +122,7 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
                 "INSERT INTO embedding VALUES (%s,%s::vector,%s,%s,%s,%s)",
                 (
                     "e" + str(i),
-                    "[0,1]" if i == 2 else "[1,0]",
+                    {0: "[1,0.1]", 2: "[0,1]"}.get(i, "[1,0]"),
                     pids[i],
                     docs[i],
                     k,
@@ -118,8 +131,11 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
             )
         c.execute("UPDATE document SET is_active=false WHERE id=%s", (docs[3],))
         c.execute(
-            "INSERT INTO embedding SELECT %s,embedding,paragraph_id,document_id,knowledge_id,source_type FROM embedding WHERE id=%s",
-            ("duplicate", "e0"),
+            "INSERT INTO embedding SELECT %s,'[1,0]'::vector,paragraph_id,document_id,knowledge_id,source_type FROM embedding WHERE id=%s",
+            ("zduplicate", "e0"),
+        )
+        c.execute(
+            "INSERT INTO embedding SELECT 'yduplicate','[1,0]'::vector,paragraph_id,document_id,knowledge_id,source_type FROM embedding WHERE id='e0'"
         )
         c.execute(
             "INSERT INTO embedding SELECT 'problem','[1,0]'::vector,paragraph_id,document_id,knowledge_id,'0' FROM embedding WHERE id='e2'"
@@ -144,10 +160,36 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
         s.flush()
         sid = source.id
         task_id = task.id
+    knowledge_without_catalog = list_knowledge(source)
+    assert len(knowledge_without_catalog) == len(kids)
+    assert all(row["workspace_name"] is None for row in knowledge_without_catalog)
+    with psycopg.connect(dsn, autocommit=True) as c:
+        c.execute("CREATE TABLE workspace(id text PRIMARY KEY, name text)")
+        c.execute("INSERT INTO workspace VALUES ('default', '默认空间'), ('team-b', '团队 B')")
+        c.execute("UPDATE knowledge SET workspace_id='team-b' WHERE id=%s", (kids[1],))
+    named_workspaces = {
+        row["workspace_id"]: row["workspace_name"] for row in list_knowledge(source)
+    }
+    assert named_workspaces == {"default": "默认空间", "team-b": "团队 B"}
+    with psycopg.connect(dsn, autocommit=True) as c:
+        c.execute("UPDATE knowledge SET workspace_id='default' WHERE id=%s", (kids[1],))
+
     from fastapi import HTTPException
 
+    mixed = main.TaskBody(
+        name="mixed", source_id=sid, knowledge_ids=[kids[0], other_knowledge]
+    )
+    with pytest.raises(HTTPException, match="同一向量模型") as create_error:
+        main.create_task(mixed, user)
+    with pytest.raises(HTTPException, match="同一向量模型") as edit_error:
+        main.edit_task(task_id, mixed, user)
+    assert create_error.value.status_code == edit_error.value.status_code == 400
+    with sessions() as session:
+        assert session.get(Task, task_id).knowledge_ids == kids
+        assert session.scalar(select(func.count()).select_from(Task)) == 1
+
     scheduled = main.TaskBody(
-        name="scheduled",
+        name="test scheduled",
         source_id=sid,
         knowledge_ids=kids,
         enabled=True,
@@ -156,7 +198,7 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
     with pytest.raises(HTTPException):
         main.create_task(scheduled, user)
     schedule_preview = main.preview_schedule(scheduled, user=user)
-    assert schedule_preview["chunks"] == 5
+    assert schedule_preview["chunks"] == 6
     with sessions() as s:
         assert s.scalar(select(func.count()).select_from(Task)) == 1
         assert s.scalar(select(func.count()).select_from(Run)) == 0
@@ -179,13 +221,18 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
         user,
     )
     assert updated["cron"] == "0 3 * * *"
+    assert updated["created_at"] == saved["created_at"]
+    with sessions() as s:
+        ordered_tasks = main.tasks(s=s, user=user)
+        assert [row["id"] for row in ordered_tasks] == [saved["id"], task_id]
+        assert ordered_tasks[0]["created_at"] > ordered_tasks[1]["created_at"]
     preview = main.estimate_task(task_id, main.EstimateRequest(), user)
     assert (
-        preview["chunks"] == 4
+        preview["chunks"] == 5
         and preview["paragraphs"] == 3
         and preview["documents"] == 3
     )
-    assert preview["comparisons"] == 5 and len(preview["knowledge"]) == 3
+    assert preview["comparisons"] == 7 and len(preview["knowledge"]) == 3
     with sessions() as s:
         assert s.scalar(select(func.count()).select_from(Run)) == 0
     from app.models import ScanEstimate
@@ -230,14 +277,20 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
         source = s.get(DataSource, sid)
     from app.source import connect
 
-    with connect(source) as conn:
-        take_snapshot(*job, conn)
-        more, after = compare_batch(*job, conn)
-        assert more
+    with VectorStore() as store:
+        with connect(source) as conn:
+            take_snapshot(*job, conn, store)
+        def stop_after_first_block(completed, processed):
+            if processed == 1:
+                raise Stopped("test partial scan")
+        with pytest.raises(Stopped, match="test partial scan"):
+            compare(store, threshold=0.9, exclude_same_document=False, block_size=1,
+                    threads=1, consume=lambda rows: save_matches(*job, rows),
+                    checkpoint=stop_after_first_block)
     with db.transaction() as s:
         run = s.get(Run, rid)
-        assert run.total == 4
-        assert run.processed == 1
+        assert run.total == 5
+        run.processed = run.cursor = 1
         run.state = "failed"
     preview_retry = main.estimate_task(
         task_id, main.EstimateRequest(retry_run_id=rid), user
@@ -253,16 +306,64 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
     with db.transaction() as s:
         with pytest.raises(Stopped):
             fenced(s, *job)
-    with connect(source) as conn:
-        take_snapshot(*newer, conn)
-        after = None
-        while True:
-            more, after = compare_batch(*newer, conn, after)
-            if not more:
-                break
+    statements = []
+
+    def record_statement(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    from app.bulk_writer import BulkWriter
+    original_guard=BulkWriter._guard
+    def reject_count_commit(*args):
+        raise RuntimeError("injected count commit failure")
+
+    with VectorStore() as store:
+        with connect(source) as conn:
+            take_snapshot(*newer, conn, store)
+        assert conn.closed
+        left, right = sorted(pids[:2])
+        match = dict(left_id=left, right_id=right, similarity=1 / (1.01 ** 0.5),
+                     left_embedding_id="e0" if left == pids[0] else "e1",
+                     right_embedding_id="e1" if right == pids[1] else "e0")
+        monkeypatch.setattr(BulkWriter,"_guard",reject_count_commit)
+        try:
+            with pytest.raises(RuntimeError, match="injected count commit failure"):
+                save_matches(*newer, [match])
+        finally:
+            monkeypatch.setattr(BulkWriter,"_guard",original_guard)
+        with sessions() as s:
+            run = s.get(Run, rid)
+            assert run.pair_count == 0 and run.processed == 0
+            assert s.scalar(select(func.count()).select_from(Pair).where(Pair.run_id == rid)) == 0
+
+        event.listen(engine, "before_cursor_execute", record_statement)
+        try:
+            save_matches(*newer, [match])
+        finally:
+            event.remove(engine, "before_cursor_execute", record_statement)
+        assert not any("count(" in sql.lower() for sql in statements)
+        with sessions() as s:
+            assert s.get(Run, rid).pair_count == 1
+            pair = s.scalar(select(Pair).where(Pair.run_id == rid))
+            assert pair.similarity == pytest.approx(match["similarity"])
+            pair_id_before = pair.id
+        # Duplicate/lower scores do not write results; matrix comparison upgrades the max.
+        statements.clear()
+        event.listen(engine, "before_cursor_execute", record_statement)
+        try:
+            save_matches(*newer, [match])
+            save_matches(*newer, [dict(match, similarity=0.9)])
+        finally:
+            event.remove(engine, "before_cursor_execute", record_statement)
+        assert not any(sql.startswith(("INSERT INTO similarity_pairs", "UPDATE similarity_pairs")) for sql in statements)
+        compare_snapshot(*newer, store)
+        with sessions() as s:
+            run = s.get(Run, rid)
+            pair = s.scalar(select(Pair).where(Pair.run_id == rid))
+            assert pair.id == pair_id_before and pair.similarity == pytest.approx(1)
+            assert run.comparisons_done == run.comparisons_total == 7
     with db.transaction() as s:
         run = s.get(Run, rid)
-        assert run.state == "succeeded" and run.pair_count == 1 and run.processed == 4
+        assert run.state == "succeeded" and run.pair_count == 1 and run.processed == 5
         assert (
             s.scalar(
                 select(func.count())
@@ -278,6 +379,28 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
         pair_id = pair.id
         view = main.pairs(rid, s=s, user=user)
         assert view["total"] == 1
+        assert view["items"][0]["left"]["workspace_name"] == "默认空间"
+        assert view["items"][0]["right"]["workspace_name"] == "默认空间"
+        assert all(
+            row["workspace_name"] == "默认空间"
+            for row in main.run_knowledge(rid, s=s, user=user)
+        )
+        # Legacy snapshots keep their IDs and acquire display labels separately.
+        for snapshot in s.scalars(
+            select(ParagraphSnapshot).where(ParagraphSnapshot.run_id == rid)
+        ):
+            snapshot.data = {
+                key: value for key, value in snapshot.data.items()
+                if key != "workspace_name"
+            }
+    with sessions() as s:
+        assert all(
+            row["workspace_name"] is None
+            for row in main.run_knowledge(rid, s=s, user=user)
+        )
+    assert main.run_workspaces(rid, user=user) == {
+        "default": "默认空间", "team-b": "团队 B",
+    }
     with sessions() as s:
         live = main.current(pair_id, "left", s=s, user=user)["current"]
     body = main.OperationBody(
@@ -305,6 +428,7 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
     with TestClient(main.app) as client:
         headers = {"X-Requested-With": "dedup"}
         assert client.get("/api/sources").status_code == 401
+        assert client.get(f"/api/runs/{rid}/workspaces").status_code == 401
         assert client.delete("/api/runs/"+rid,headers=headers).status_code == 401
         assert client.get("/api/ingestion/settings").status_code == 401
         assert client.post("/api/ingestion/queues",headers=headers,json={}).status_code == 401
@@ -317,6 +441,7 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
             == 200
         )
         assert client.get("/api/me").json()["username"] == "test"
+        assert client.get(f"/api/runs/{rid}/workspaces").json()["default"] == "默认空间"
         intake=client.get("/api/ingestion/settings")
         assert intake.status_code == 200
         assert len(intake.headers["X-Request-ID"]) == 32
@@ -386,15 +511,23 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
     with db.transaction() as s:
         background_run = enqueue(s, s.get(Task, task_id))
         background_id = background_run.id
+    from app import scanning
+    original_compare = scanning.compare_snapshot
+    def check_source_released(*args, **kwargs):
+        control = args[3] if len(args) > 3 else kwargs.get("control")
+        assert control is not None and control.connection is None
+        return original_compare(*args, **kwargs)
+    monkeypatch.setattr(scanning, "compare_snapshot", check_source_released)
     with TestClient(main.app) as client:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             with sessions() as s:
-                background_state = s.get(Run, background_id).state
+                background = s.get(Run, background_id)
+                background_state, background_error = background.state, background.error
             if background_state in ["succeeded", "failed"]:
                 break
             time.sleep(0.05)
-        assert background_state == "succeeded"
+        assert background_state == "succeeded", background_error
         assert client.get("/api/health").status_code == 200
     import httpx
     from app import source_operations
@@ -589,4 +722,113 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
     assert archived.value.status_code==409
     with psycopg.connect(dsn) as c:
         assert c.execute("SELECT count(*) FROM document").fetchone()[0]==3
+    # Task deletion stops scheduling and active runs while preserving scan records.
+    with db.transaction() as s:
+        unused = Task(name="unused task", source_id=sid, knowledge_ids=kids)
+        s.add(unused)
+        s.flush()
+        unused_id = unused.id
+        queued = enqueue(s, s.get(Task, saved["id"]))
+        queued_id = queued.id
+        active = enqueue(s, s.get(Task, task_id))
+        active.state = "running"
+        active.token = str(uuid4())
+        active.lease_until = now() + timedelta(minutes=3)
+        active_job = (active.id, active.token)
+        unconsumed = ScanEstimate(
+            task_id=task_id, user_id=user.id, config={}, summary={},
+            expires_at=now() + timedelta(minutes=10),
+        )
+        s.add(unconsumed)
+        s.flush()
+        stale_estimate_id = unconsumed.id
+
+    deletion_client = TestClient(main.app)
+    assert deletion_client.delete(f"/api/tasks/{task_id}").status_code == 403
+    assert deletion_client.delete(
+        f"/api/tasks/{task_id}", headers=headers
+    ).status_code == 401
+    assert deletion_client.post(
+        "/api/login", headers=headers,
+        json={"username": "test", "password": change["new_password"]},
+    ).status_code == 200
+    for target in [task_id, saved["id"], unused_id, task_id]:
+        response = deletion_client.delete(f"/api/tasks/{target}", headers=headers)
+        assert response.status_code == 200, response.text
+    assert deletion_client.get("/api/tasks").json() == []
+    assert deletion_client.get(f"/api/runs/{background_id}/pairs").json()["total"] == 1
+    with sessions() as s:
+        for target in [task_id, saved["id"], unused_id]:
+            removed = s.get(Task, target)
+            assert removed.deleted_at is not None
+            assert not removed.enabled and removed.next_fire is None
+        assert s.get(Run, queued_id).state == "cancelled"
+        assert s.get(Run, active_job[0]).cancel_requested
+        assert s.get(Run, background_id).state == "succeeded"
+        assert s.get(Run, old_rid).state == "failed"
+        assert s.get(ScanEstimate, stale_estimate_id) is None
+        assert s.scalar(select(main.source_target_in_use(sid)))
+    with db.transaction() as s:
+        with pytest.raises(Stopped, match="用户取消"):
+            fenced(s, *active_job)
+    stale_confirm = {"estimate_id": stale_estimate_id}
+    task_body = main.TaskBody(name="removed", source_id=sid, knowledge_ids=kids)
+    assert deletion_client.put(
+        f"/api/tasks/{task_id}", headers=headers, json=task_body.model_dump()
+    ).status_code == 404
+    assert deletion_client.post(
+        f"/api/tasks/{task_id}/preview", headers=headers, json=task_body.model_dump()
+    ).status_code == 404
+    assert deletion_client.post(
+        f"/api/tasks/{task_id}/estimate", headers=headers, json={}
+    ).status_code == 404
+    assert deletion_client.post(
+        f"/api/tasks/{task_id}/run", headers=headers, json=stale_confirm
+    ).status_code == 404
+    from app.jobs import tick
+    tick()
+    with db.transaction() as s:
+        with pytest.raises(ValueError, match="任务已删除"):
+            enqueue(s, s.get(Task, task_id))
+    assert main.delete_run(old_rid, user)["ok"]
+    assert list((tmp_path / "ingestion" / ".scan-tmp").iterdir()) == []
+    # Cancellation during matrix result persistence marks the run incomplete and cleans files.
+    with psycopg.connect(dsn, autocommit=True) as c:
+        for i in range(2):
+            document_id, paragraph_id = str(uuid4()), str(uuid4())
+            c.execute("INSERT INTO document VALUES (%s,%s,%s,true)",
+                      (document_id, "cancel document", other_knowledge))
+            c.execute("INSERT INTO paragraph(id,title,content,document_id,knowledge_id) VALUES (%s,'cancel','text',%s,%s)",
+                      (paragraph_id, document_id, other_knowledge))
+            c.execute("INSERT INTO embedding VALUES (%s,'[1,0]'::vector,%s,%s,%s,'1')",
+                      (f"cancel-{i}", paragraph_id, document_id, other_knowledge))
+    with db.transaction() as s:
+        cancel_task = Task(name="matrix cancel", source_id=sid,
+                           knowledge_ids=[other_knowledge], batch_size=2)
+        s.add(cancel_task)
+        s.flush()
+        cancel_run_id = enqueue(s, cancel_task).id
+    cancel_job = scanning.claim()
+    assert cancel_job[0] == cancel_run_id
+    original_guard=BulkWriter._guard
+    def cancel_before_commit(writer,seq,key,delta):
+        if delta["kind"]=="results":
+            with db.transaction() as s:
+                s.get(Run,writer.run_id).cancel_requested=True
+        return original_guard(writer,seq,key,delta)
+    with monkeypatch.context() as patch:
+        patch.setattr(BulkWriter,"_guard",cancel_before_commit)
+        scanning.execute(*cancel_job,control=scanning.ScanControl())
+        with sessions() as s:
+            profile=s.get(Run,cancel_job[0]).timing.data
+            assert profile["final"] and profile["run_id"]==cancel_job[0]
+            keys={stage["key"] for stage in profile["stages"]}
+            assert {"source_connection","snapshot","compare","multiply","result_write","connection","commit"}<=keys
+            assert profile["counters"].get("inserted_pairs",0)==0
+
+    with sessions() as s:
+        cancelled = s.get(Run, cancel_run_id)
+        assert cancelled.state == "cancelled" and cancelled.error == "用户取消"
+        assert cancelled.snapshot_ready and cancelled.pair_count == 0
+    assert list((tmp_path / "ingestion" / ".scan-tmp").iterdir()) == []
     engine.dispose()

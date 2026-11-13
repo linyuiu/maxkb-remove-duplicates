@@ -20,6 +20,8 @@ def next_fire(expression, tz, base=None):
 def enqueue(s, task, config=None):
     from .estimation import scan_config
 
+    if task.deleted_at is not None:
+        raise ValueError("任务已删除")
     config = config or scan_config(task)
     # All entry points lock the task, including manual execution and resume.
     source = s.get(DataSource, config["source_id"])
@@ -46,7 +48,11 @@ def tick():
     with transaction() as s:
         tasks = s.scalars(
             select(Task)
-            .where(Task.enabled == True, Task.next_fire <= now())
+            .where(
+                Task.deleted_at.is_(None),
+                Task.enabled == True,
+                Task.next_fire <= now(),
+            )
             .with_for_update(skip_locked=True)
         ).all()
         for task in tasks:

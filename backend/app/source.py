@@ -1,10 +1,15 @@
 import json
 import math
+import threading
+import time
 from contextlib import contextmanager
 from uuid import UUID
 import psycopg
+from psycopg.errors import InsufficientPrivilege, UndefinedColumn, UndefinedTable
 from psycopg.rows import dict_row
+from psycopg.pq import TransactionStatus
 from .security import decrypt, content_hash
+from .profiling import measure
 
 
 def validated_ids(values):
@@ -13,28 +18,53 @@ def validated_ids(values):
 
 @contextmanager
 def connect(source, statement_timeout_ms=60000):
+    if getattr(source, "deleted_at", None) is not None:
+        raise ValueError("数据源已删除")
     if not source.connection:
         raise ValueError("此连接仅配置 API，扫描需要数据库连接")
     # All source transactions, including discovery and current-text reads, are read-only.
-    with psycopg.connect(
-        decrypt(source.connection),
-        row_factory=dict_row,
-        connect_timeout=10,
-        options=f"-c default_transaction_read_only=on -c statement_timeout={int(statement_timeout_ms)}",
-    ) as conn:
-        conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+    with measure("source_connection", "建立 MaxKB 源库连接"):
+        connection = psycopg.connect(
+            decrypt(source.connection),
+            row_factory=dict_row,
+            connect_timeout=30,
+            options=f"-c default_transaction_read_only=on -c statement_timeout={int(statement_timeout_ms)}",
+        )
+    with connection as conn:
+        with measure("source_begin", "开启源库只读快照事务"):
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         yield conn
 
 
 def list_knowledge(source):
     with connect(source) as conn:
-        return conn.execute("""
+        rows = conn.execute("""
             SELECT k.id::text AS id, k.name, k.workspace_id, k.embedding_model_id::text,
                    m.name AS model_name
             FROM knowledge k LEFT JOIN model m ON m.id=k.embedding_model_id
             WHERE EXISTS (SELECT 1 FROM paragraph p WHERE p.knowledge_id=k.id)
             ORDER BY k.workspace_id, k.name, k.id
         """).fetchall()
+
+        names = workspace_names(conn, {row["workspace_id"] for row in rows})
+        return [dict(row, workspace_name=names.get(row["workspace_id"])) for row in rows]
+
+
+def workspace_names(conn, ids=None):
+    if ids is not None and not ids:
+        return {}
+    query = "SELECT id::text, name FROM workspace"
+    params = ()
+    if ids is not None:
+        query += " WHERE id::text = ANY(%s::text[])"
+        params = (list(ids),)
+    try:
+        # The workspace catalog is optional for community editions and restricted roles.
+        with conn.transaction():
+            rows = conn.execute(query, params).fetchall()
+    except (UndefinedTable, UndefinedColumn, InsufficientPrivilege):
+        return {}
+    return {row["id"]: row["name"] for row in rows}
 
 
 def check_models(conn, ids):
@@ -47,6 +77,7 @@ def check_models(conn, ids):
     models = {r["embedding_model_id"] for r in rows}
     if None in models or len(models) != 1:
         raise ValueError("所选知识库必须使用同一向量模型；不同模型不能直接比较")
+    return next(iter(models))
 
 
 def parse_vector(value, expected_dimension=None):
@@ -86,21 +117,136 @@ def document_scope(row_alias):
     ))"""
 
 
-# LEFT JOIN is intentional: dangling records fail the snapshot rather than silently disappearing.
-SNAPSHOT_SQL = f"""
-    SELECT e.id AS embedding_id, vector_dims(e.embedding) AS dims, vector_norm(e.embedding) AS norm,
+# COPY streams one row at a time. No text vectors or repeated paragraph bodies
+# cross the wire. LEFT JOIN keeps dangling records visible to validation.
+VECTOR_SNAPSHOT_SQL = f"""
+    SELECT e.id::text AS embedding_id, vector_send(e.embedding) AS vector,
            e.paragraph_id::text, e.document_id::text, e.knowledge_id::text,
-           p.title, p.content, p.update_time, p.document_id::text AS p_document_id,
-           p.knowledge_id::text AS p_knowledge_id, d.knowledge_id::text AS d_knowledge_id,
-           d.name AS document_name, k.name AS knowledge_name, k.workspace_id
+           p.content IS NOT NULL AS has_content, p.document_id::text AS p_document_id,
+           p.knowledge_id::text AS p_knowledge_id, d.knowledge_id::text AS d_knowledge_id
     FROM embedding e
     LEFT JOIN paragraph p ON p.id=e.paragraph_id
     LEFT JOIN document d ON d.id=e.document_id
-    LEFT JOIN knowledge k ON k.id=e.knowledge_id
     WHERE e.knowledge_id=ANY(%(knowledge_ids)s::uuid[]) AND e.source_type='1'
       AND {document_scope('e')}
-    ORDER BY e.id
 """
+VECTOR_SNAPSHOT_COLUMNS = (
+    "embedding_id", "vector", "paragraph_id", "document_id", "knowledge_id",
+    "has_content", "p_document_id", "p_knowledge_id", "d_knowledge_id",
+)
+VECTOR_SNAPSHOT_TYPES = ("text", "bytea", "text", "text", "text", "bool", "text", "text", "text")
+
+# Reject oversized text on the server before COPY allocates/transmits the row.
+# It is never truncated. EXISTS returns each paragraph once, even with many chunks.
+PARAGRAPH_SNAPSHOT_SQL = f"""
+    WITH scoped AS (
+        SELECT p.id::text AS paragraph_id, p.document_id::text, p.knowledge_id::text,
+               k.workspace_id::text, p.title, p.content, p.update_time::text,
+               d.name AS document_name, k.name AS knowledge_name,
+               coalesce(octet_length(p.content),0)::bigint
+                 + coalesce(octet_length(p.title),0)
+                 + coalesce(octet_length(d.name),0)
+                 + coalesce(octet_length(k.name),0)
+                 + coalesce(octet_length(k.workspace_id::text),0) AS payload_bytes
+        FROM paragraph p
+        LEFT JOIN document d ON d.id=p.document_id
+        LEFT JOIN knowledge k ON k.id=p.knowledge_id
+        WHERE EXISTS (
+            SELECT 1 FROM embedding e WHERE e.paragraph_id=p.id
+              AND e.knowledge_id=ANY(%(knowledge_ids)s::uuid[]) AND e.source_type='1'
+              AND {document_scope('e')}
+        )
+    )
+    SELECT paragraph_id, document_id, knowledge_id,
+           CASE WHEN payload_bytes<=%(max_paragraph_bytes)s THEN workspace_id END AS workspace_id,
+           CASE WHEN payload_bytes<=%(max_paragraph_bytes)s THEN title END AS title,
+           CASE WHEN payload_bytes<=%(max_paragraph_bytes)s THEN content END AS content,
+           update_time,
+           CASE WHEN payload_bytes<=%(max_paragraph_bytes)s THEN document_name END AS document_name,
+           CASE WHEN payload_bytes<=%(max_paragraph_bytes)s THEN knowledge_name END AS knowledge_name,
+           payload_bytes
+    FROM scoped
+"""
+PARAGRAPH_SNAPSHOT_COLUMNS = (
+    "paragraph_id", "document_id", "knowledge_id", "workspace_id", "title",
+    "content", "update_time", "document_name", "knowledge_name", "payload_bytes",
+)
+PARAGRAPH_SNAPSHOT_TYPES = ("text",) * 9 + ("int8",)
+
+
+class _ReadDeadline:
+    """Bound stalled network reads, excluding time spent consuming a COPY row."""
+
+    def __init__(self, conn, seconds):
+        self.conn, self.seconds = conn, seconds
+        self.condition = threading.Condition()
+        self.deadline = None
+        self.stopped = self.expired = False
+        self.thread = threading.Thread(target=self._watch, daemon=True)
+
+    def _watch(self):
+        with self.condition:
+            while not self.stopped:
+                if self.deadline is None:
+                    self.condition.wait()
+                elif (remaining := self.deadline - time.monotonic()) > 0:
+                    self.condition.wait(remaining)
+                else:
+                    self.expired = True
+                    try:
+                        self.conn.cancel_safe(timeout=2)
+                    except Exception:
+                        pass
+                    return
+
+    def resume(self):
+        with self.condition:
+            self.deadline = time.monotonic() + self.seconds
+            self.condition.notify()
+
+    def pause(self):
+        with self.condition:
+            self.deadline = None
+            if self.expired:
+                raise TimeoutError(f"读取源快照连续 {self.seconds:g} 秒未返回数据")
+
+    def close(self):
+        with self.condition:
+            self.stopped = True
+            self.condition.notify()
+        self.thread.join(timeout=3)
+
+
+def snapshot_rows(conn, query, params, columns, types, read_timeout=120):
+    # A COPY statement lasts for the whole transfer: statement_timeout would
+    # otherwise include every slow metadata write while its generator is paused.
+    timeout = conn.execute("SHOW statement_timeout").fetchone()["statement_timeout"]
+    conn.execute("SELECT set_config('statement_timeout','0',true)")
+    deadline = _ReadDeadline(conn, read_timeout)
+    deadline.thread.start()
+    try:
+        with conn.cursor() as cursor:
+            deadline.resume()
+            with cursor.copy(f"COPY ({query}) TO STDOUT (FORMAT BINARY)", params) as stream:
+                deadline.pause()
+                stream.set_types(types)
+                while True:
+                    deadline.resume()
+                    values = stream.read_row()
+                    deadline.pause()
+                    if values is None:
+                        break
+                    # No fetchmany() list: one bounded COPY record is decoded.
+                    yield dict(zip(columns, values, strict=True))
+                    del values
+    except Exception as exc:
+        if deadline.expired:
+            raise TimeoutError(f"读取源快照连续 {read_timeout:g} 秒未返回数据") from exc
+        raise
+    finally:
+        deadline.close()
+        if conn.info.transaction_status == TransactionStatus.INTRANS:
+            conn.execute("SELECT set_config('statement_timeout',%s,true)", (timeout,))
 
 
 def current_paragraph(source, target, connection=None):

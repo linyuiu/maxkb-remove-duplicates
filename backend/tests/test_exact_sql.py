@@ -10,7 +10,33 @@ import random
 import subprocess
 import os
 import pytest
-from app.scanning import ANCHORS_SQL, COMPARE_SQL
+from app.source import document_scope
+from app.matrix import VectorStore, compare
+
+# Frozen SQL baseline, used only to check the new matrix engine against pgvector.
+ANCHORS_SQL = f"""
+SELECT id FROM embedding e
+WHERE knowledge_id=ANY(%(knowledge_ids)s::uuid[]) AND source_type='1'
+  AND {document_scope('e')}
+  AND (%(start)s::text IS NULL OR id>%(start)s)
+ORDER BY id LIMIT %(batch_size)s
+"""
+COMPARE_SQL = f"""
+WITH scores AS (
+ SELECT LEAST(a.paragraph_id::text,b.paragraph_id::text) AS left_id,
+        GREATEST(a.paragraph_id::text,b.paragraph_id::text) AS right_id,
+        1-(a.embedding <=> b.embedding) AS similarity
+ FROM embedding a JOIN embedding b ON b.id<a.id
+ WHERE a.knowledge_id=ANY(%(knowledge_ids)s::uuid[]) AND a.source_type='1'
+   AND b.knowledge_id=ANY(%(knowledge_ids)s::uuid[]) AND b.source_type='1'
+   AND {document_scope('a')} AND {document_scope('b')}
+   AND (%(start)s::text IS NULL OR a.id>%(start)s) AND a.id<=%(end)s
+   AND a.paragraph_id<>b.paragraph_id
+   AND (NOT %(exclude_doc)s OR a.document_id<>b.document_id)
+)
+SELECT left_id,right_id,max(similarity) AS similarity FROM scores
+WHERE similarity >= %(threshold)s GROUP BY left_id,right_id
+"""
 
 
 def oracle(rows, threshold, exclude_doc):
@@ -93,5 +119,20 @@ def test_production_sql_matches_independent_all_pairs(
     ]
     expected = oracle(expected_rows, threshold, exclude_doc)
     assert actual.keys() == expected.keys()
+    matrix = {}
+    def consume(matches):
+        for match in matches:
+            key = match["left_id"], match["right_id"]
+            matrix[key] = max(matrix.get(key, -1), match["similarity"])
+    with VectorStore() as store:
+        for row in sorted(expected_rows, key=lambda r: r["embedding_id"]):
+            store.append(dict(row, vector=row["vector"]))
+        store.flush()
+        compared = compare(store, threshold=threshold, exclude_same_document=exclude_doc,
+                           block_size=batch_size, threads=1, consume=consume,
+                           checkpoint=lambda *args: None)
+        assert compared == store.comparisons(exclude_doc)
+    assert matrix.keys() == actual.keys() == expected.keys()
     for key in actual:
         assert actual[key] == pytest.approx(expected[key], abs=1e-6)
+        assert matrix[key] == pytest.approx(expected[key], abs=1e-6)

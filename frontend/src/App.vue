@@ -2,9 +2,19 @@
 import { ref, computed, onMounted, onUnmounted, defineAsyncComponent, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { PreviewCache } from "./previewCache";
+import RunTimingDialog from "./components/RunTimingDialog.vue";
+import type { ScanTiming } from "./scanTiming";
 const previewCache = new PreviewCache();
 const KnowledgeIngestion=defineAsyncComponent(()=>import("./components/KnowledgeIngestion.vue"));
 type Row = Record<string, any>;
+type ScanKnowledge = {
+  id: string;
+  name: string;
+  workspace_id: string;
+  workspace_name: string | null;
+  embedding_model_id: string | null;
+  model_name: string | null;
+};
 const user = ref(""),
   ready = ref(false),
   tab = ref("runs"),
@@ -50,6 +60,7 @@ const sources = ref<Row[]>([]),
   tasks = ref<Row[]>([]),
   runs = ref<Row[]>([]),
   operations = ref<Row[]>([]);
+const testingSourceIds = ref(new Set<string>());
 const estimateOpen = ref(false),
   scanEstimate = ref<Row | null>(null),
   estimateContext = ref<Row>({});
@@ -59,15 +70,37 @@ const sourceOpen = ref(false),
   taskOpen = ref(false),
   sourceForm = ref<Row>({}),
   taskForm = ref<Row>({});
-const knowledge = ref<Row[]>([]),
-  workspace = ref(""),
+const knowledge = ref<ScanKnowledge[]>([]),
+  taskWorkspaceIds = ref<string[]>([]),
+  taskModelId = ref(""),
   loadingKnowledge = ref(false);
+let knowledgeRequest = 0;
 const resultKnowledge = ref<Row[]>([]);
+const resultWorkspaceNames = ref<Record<string, string>>({});
 const loadingResultKnowledge = ref(false);
 const selectedRun = ref<Row | null>(null),
   results = ref<Row[]>([]),
   total = ref(0),
   page = ref(1);
+const timingOpen = ref(false);
+const timingTarget = ref<Row | null>(null);
+const timingRun = computed(() => {
+  const id = timingTarget.value?.id;
+  return (
+    runs.value.find((run) => run.id === id) ||
+    (selectedRun.value?.id === id ? selectedRun.value : timingTarget.value)
+  );
+});
+const timingProfile = computed<ScanTiming | null>(() => {
+  const profile = timingRun.value?.config?.timings as ScanTiming | undefined;
+  return profile?.version === 1 && profile.run_id === timingRun.value?.id
+    ? profile
+    : null;
+});
+function openTiming(run: Row) {
+  timingTarget.value = run;
+  timingOpen.value = true;
+}
 const filter = ref({
   status: "",
   knowledge_id: "",
@@ -96,14 +129,115 @@ const stateLabels: Row = {
   unknown: "待核实",
   conflict: "源内容冲突",
 };
-const availableKnowledge = computed(() =>
-  knowledge.value.filter(
-    (k) => !workspace.value || k.workspace_id === workspace.value,
-  ),
+const knowledgeById = computed(
+  () => new Map(knowledge.value.map((k) => [k.id, k])),
 );
-const workspaces = computed(() => [
-  ...new Set(knowledge.value.map((k) => k.workspace_id)),
-]);
+function workspaceName(
+  k: Pick<ScanKnowledge, "workspace_id" | "workspace_name">,
+) {
+  if (k.workspace_name?.trim()) return k.workspace_name.trim();
+  if (k.workspace_id === "default") return "默认工作空间";
+  if (!k.workspace_id || k.workspace_id === "None") return "未分配工作空间";
+  return k.workspace_id;
+}
+function resultWorkspaceName(item: Row) {
+  return workspaceName({
+    workspace_id: item.workspace_id,
+    workspace_name:
+      item.workspace_name || resultWorkspaceNames.value[item.workspace_id],
+  });
+}
+function selectedKnowledgeLabel(id: string) {
+  const k = knowledgeById.value.get(id);
+  return k ? `${k.name} · ${workspaceName(k)}` : "不可用知识库";
+}
+const modelGroups = computed(() => {
+  const groups = new Map<string, { id: string; name: string; count: number }>();
+  for (const k of knowledge.value) {
+    const id = k.embedding_model_id;
+    if (!id) continue;
+    const group = groups.get(id);
+    if (group) group.count++;
+    else groups.set(id, { id, name: k.model_name || id, count: 1 });
+  }
+  const nameCounts = new Map<string, number>();
+  for (const { name } of groups.values()) {
+    nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+  }
+  return [...groups.values()].map(({ id, name, count }) => {
+    const displayName =
+      (nameCounts.get(name) ?? 0) > 1 ? `${name} · ${id.slice(0, 8)}` : name;
+    return { id, label: `${displayName}（${count}）` };
+  });
+});
+const workspaceGroups = computed(() => {
+  const groups = new Map<
+    string,
+    { id: string; name: string; items: ScanKnowledge[] }
+  >();
+  for (const k of knowledge.value) {
+    if (k.embedding_model_id !== taskModelId.value) continue;
+    const group = groups.get(k.workspace_id);
+    if (group) group.items.push(k);
+    else
+      groups.set(k.workspace_id, {
+        id: k.workspace_id,
+        name: workspaceName(k),
+        items: [k],
+      });
+  }
+  const nameCounts = new Map<string, number>();
+  for (const { name } of groups.values()) {
+    nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      label:
+        (nameCounts.get(group.name) ?? 0) > 1
+          ? `${group.name} · ${group.id.slice(0, 8)}`
+          : group.name,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label, "zh-CN"));
+});
+const availableWorkspaceGroups = computed(() => {
+  const selected = new Set(taskWorkspaceIds.value);
+  return workspaceGroups.value.filter(
+    (group) => !selected.size || selected.has(group.id),
+  );
+});
+const taskKnowledgeTree = computed(() =>
+  availableWorkspaceGroups.value.map((group) => ({
+    value: `workspace:${group.id}`,
+    label: group.label,
+    children: group.items.map((k) => ({ value: k.id, label: k.name })),
+  })),
+);
+const availableKnowledge = computed(() =>
+  availableWorkspaceGroups.value.flatMap((group) => group.items),
+);
+const selectedKnowledgeIds = computed<string[]>(
+  () => taskForm.value.knowledge_ids ?? [],
+);
+const allAvailableSelected = computed(() => {
+  const selected = new Set(selectedKnowledgeIds.value);
+  return (
+    availableKnowledge.value.length > 0 &&
+    availableKnowledge.value.every((k) => selected.has(k.id))
+  );
+});
+function matchesModel(ids: string[], modelId: string) {
+  return (
+    !!modelId &&
+    ids.length > 0 &&
+    ids.every(
+      (id) => knowledgeById.value.get(id)?.embedding_model_id === modelId,
+    )
+  );
+}
+const taskScopeValid = computed(() =>
+  matchesModel(selectedKnowledgeIds.value, taskModelId.value),
+);
 const taskName = (id: string) =>
   tasks.value.find((t) => t.id === id)?.name || id.slice(0, 8);
 const sourceName = (id: string) =>
@@ -203,17 +337,73 @@ async function saveSource() {
     ElMessage.success("数据源已保存");
   });
 }
-async function loadKnowledge() {
-  knowledge.value = [];
-  if (!taskForm.value.source_id) return;
-  loadingKnowledge.value = true;
+async function testSourceConnection(sourceId: string) {
+  if (testingSourceIds.value.has(sourceId)) return;
+  testingSourceIds.value.add(sourceId);
   try {
-    knowledge.value = await api(
-      "/sources/" + taskForm.value.source_id + "/knowledge",
+    const result = await post("/sources/" + sourceId + "/test");
+    ElMessage.success(
+      result.read_only ? "连接成功，读取事务为只读" : "连接成功",
     );
+  } catch (error: unknown) {
+    ElMessage.error(error instanceof Error ? error.message : String(error));
   } finally {
-    loadingKnowledge.value = false;
+    testingSourceIds.value.delete(sourceId);
   }
+}
+async function deleteSource(row: Row) {
+  await action(async () => {
+    await ElMessageBox.confirm(
+      `确定删除数据源“${row.name}”？已有扫描记录和操作历史会保留，MaxKB 源数据不会删除。`,
+      "删除数据源",
+      {
+        type: "warning",
+        confirmButtonText: "删除数据源",
+        cancelButtonText: "取消",
+      },
+    );
+    await api("/sources/" + row.id, { method: "DELETE" });
+    await refresh();
+    ElMessage.success("数据源已删除");
+  });
+}
+async function loadKnowledge() {
+  const request = ++knowledgeRequest;
+  const sourceId = taskForm.value.source_id;
+  knowledge.value = [];
+  taskModelId.value = "";
+  loadingKnowledge.value = !!sourceId;
+  if (!sourceId) return;
+  try {
+    const options = await api("/sources/" + sourceId + "/knowledge");
+    if (request !== knowledgeRequest) return;
+    knowledge.value = options;
+    const ids = selectedKnowledgeIds.value;
+    const modelId = knowledgeById.value.get(ids[0])?.embedding_model_id;
+    if (modelId && matchesModel(ids, modelId)) taskModelId.value = modelId;
+    else if (!ids.length && modelGroups.value.length === 1)
+      taskModelId.value = modelGroups.value[0].id;
+  } catch (error) {
+    if (request === knowledgeRequest) throw error;
+  } finally {
+    if (request === knowledgeRequest) loadingKnowledge.value = false;
+  }
+}
+function taskModelChanged(modelId: string) {
+  taskWorkspaceIds.value = [];
+  taskForm.value.knowledge_ids = selectedKnowledgeIds.value.filter(
+    (id) => knowledgeById.value.get(id)?.embedding_model_id === modelId,
+  );
+}
+function toggleAvailableKnowledge() {
+  const available = availableKnowledge.value.map((k) => k.id);
+  const selected = new Set(selectedKnowledgeIds.value);
+  const remove = allAvailableSelected.value;
+  for (const id of available) {
+    if (remove) selected.delete(id);
+    else selected.add(id);
+  }
+  taskForm.value.knowledge_ids = [...selected];
 }
 async function openTask(row?: Row) {
   await action(async () => {
@@ -230,19 +420,19 @@ async function openTask(row?: Row) {
           threshold: 0.9,
           exclude_same_document: false,
           include_inactive_documents: true,
-          batch_size: 32,
+          batch_size: 1024,
           cron: "0 0 * * *",
           timezone: "Asia/Shanghai",
           enabled: false,
         };
-    workspace.value = "";
+    taskWorkspaceIds.value = [];
     taskOpen.value = true;
     await loadKnowledge();
   });
 }
 async function sourceChanged() {
   taskForm.value.knowledge_ids = [];
-  workspace.value = "";
+  taskWorkspaceIds.value = [];
   await action(loadKnowledge);
 }
 async function persistTask(form: Row, token?: string) {
@@ -258,7 +448,7 @@ async function persistTask(form: Row, token?: string) {
 async function saveTask() {
   await action(async () => {
     const form = JSON.parse(JSON.stringify(taskForm.value));
-    if (!form.knowledge_ids.length) throw new Error("请选择至少一个知识库");
+    if (!taskScopeValid.value) throw new Error("请选择同一向量模型下的知识库");
     if (form.enabled) {
       scanEstimate.value = await post(
         "/tasks" + (form.id ? "/" + form.id : "") + "/preview",
@@ -339,6 +529,22 @@ async function runAction(row: Row, kind: string) {
     if (selectedRun.value?.id === row.id) await loadPairs();
   });
 }
+async function deleteTask(row: Row) {
+  await action(async () => {
+    await ElMessageBox.confirm(
+      `确定删除任务“${row.name}”？删除后停止定时调度，并取消该任务排队中或执行中的扫描。已有扫描记录和结果会保留。`,
+      "删除扫描任务",
+      {
+        type: "warning",
+        confirmButtonText: "删除任务",
+        cancelButtonText: "取消",
+      },
+    );
+    await api("/tasks/" + row.id, { method: "DELETE" });
+    await refresh();
+    ElMessage.success("任务已删除");
+  });
+}
 async function deleteRun(row: Row) {
   await action(async () => {
     await ElMessageBox.confirm(
@@ -371,6 +577,13 @@ async function openRun(row: Row) {
   page.value = 1;
   filter.value = { status: "", knowledge_id: "", document: "", min_score: 0 };
   resultKnowledge.value = [];
+  resultWorkspaceNames.value = {};
+  // Optional labels load independently of the result page.
+  void api("/runs/" + row.id + "/workspaces")
+    .then((names) => {
+      if (selectedRun.value?.id === row.id) resultWorkspaceNames.value = names;
+    })
+    .catch(() => {});
   await action(async () => {
     loadingResultKnowledge.value = true;
     try {
@@ -577,7 +790,14 @@ onUnmounted(() => clearInterval(timer));
         <div class="brand-icon">M</div>
         <div>MaxKB <small>知识库治理平台</small></div>
       </div>
-      <el-select v-model="feature" aria-label="切换功能" style="margin-bottom:16px"><el-option label="知识入库" value="ingestion"/><el-option label="重复片段" value="duplicates"/></el-select>
+      <el-select
+        v-model="feature"
+        aria-label="切换功能"
+        style="margin-bottom: 16px"
+        ><el-option label="知识入库" value="ingestion" /><el-option
+          label="重复片段"
+          value="duplicates"
+      /></el-select>
       <template v-if="feature==='ingestion'"><button v-for="(label,page) in ingestionPages" :key="page" :class="{active:ingestionPage===page}" @click="ingestionPage=String(page)">{{label}}</button></template>
       <template v-else>
       <button
@@ -689,466 +909,563 @@ onUnmounted(() => clearInterval(timer));
       </header>
       <section class="content">
         <KnowledgeIngestion v-if="ingestionLoaded" v-show="feature==='ingestion'" :active="feature==='ingestion'" :page="ingestionPage" @navigate="ingestionPage=$event" @connections="feature='duplicates';tab='sources';selectedRun=null"/>
-        <template v-if="feature==='duplicates'">
-        <template v-if="tab === 'sources'"
-          ><div class="page-heading">
-            <h1>数据源</h1>
-            <el-button type="primary" @click="openSource()"
-              >＋ 添加数据源</el-button
-            >
-          </div>
-          <el-empty
-            v-if="!sources.length"
-            description="添加第一个 MaxKB 数据源"
-          />
-          <div class="source-grid">
-            <el-card v-for="source in sources" :key="source.id"
-              ><div class="card-top">
-                <div class="db-icon">DB</div>
-                <el-tag :type="source.enabled ? 'success' : 'info'">{{
-                  source.enabled ? "已启用" : "已停用"
-                }}</el-tag>
-              </div>
-              <h3>{{ source.name }}</h3>
-              <p v-if="source.api_only">MaxKB API 连接 · 仅知识入库</p><p v-else>{{ source.host }}:{{ source.port }} / {{ source.dbname }}</p>
-              <p class="muted">{{source.api_only?source.api_base_url:"数据库用户："+source.user}}</p>
-              <div class="card-actions">
-                <el-button v-if="!source.api_only"
-                  @click="
-                    action(async () => {
-                      const r = await post('/sources/' + source.id + '/test');
-                      ElMessage.success(
-                        r.read_only ? '连接成功，读取事务为只读' : '连接成功',
-                      );
-                    })
-                  "
-                  >测试连接</el-button
-                ><el-button @click="openSource(source)">编辑</el-button>
-              </div></el-card
-            >
-          </div></template
-        >
-
-        <template v-else-if="tab === 'tasks'"
-          ><div class="page-heading">
-            <h1>扫描任务</h1>
-            <el-button type="primary" @click="openTask()"
-              >＋ 新建任务</el-button
-            >
-          </div>
-          <el-card
-            ><el-table
-              :data="tasks"
-              empty-text="暂无任务，请先配置数据源并创建任务"
-              ><el-table-column
-                prop="name"
-                label="任务"
-                min-width="160"
-              /><el-table-column label="数据源" min-width="140"
-                ><template #default="{ row }">{{
-                  sourceName(row.source_id)
-                }}</template></el-table-column
-              ><el-table-column label="范围" width="100"
-                ><template #default="{ row }"
-                  >{{ row.knowledge_ids.length }} 个知识库</template
-                ></el-table-column
-              ><el-table-column
-                prop="threshold"
-                label="阈值"
-                width="80"
-              /><el-table-column label="定时" min-width="180"
-                ><template #default="{ row }"
-                  ><el-tag :type="row.enabled ? 'success' : 'info'">{{
-                    row.enabled ? row.cron : "手动 / 已暂停"
-                  }}</el-tag>
-                  <div v-if="row.enabled" class="muted small">
-                    下次 {{ date(row.next_fire) }}
-                  </div>
-                  <div v-if="row.skipped_fires" class="muted small">
-                    已跳过 {{ row.skipped_fires }} 次重叠或停用触发
-                  </div></template
-                ></el-table-column
-              ><el-table-column label="操作" width="190"
-                ><template #default="{ row }"
-                  ><el-button
-                    type="primary"
-                    plain
-                    :disabled="busy"
-                    @click="startTask(row)"
-                    >预估并扫描</el-button
-                  ><el-button text @click="openTask(row)"
-                    >编辑</el-button
-                  ></template
-                ></el-table-column
-              ></el-table
-            ></el-card
-          ></template
-        >
-
-        <template v-else-if="tab === 'runs' && !selectedRun"
-          ><div class="page-heading">
-            <h1>扫描记录</h1>
-            <el-button @click="action(refresh)">刷新</el-button>
-          </div>
-          <div class="stats">
-            <div>
-              <span>最近运行</span><strong>{{ runs.length }}</strong>
-            </div>
-            <div>
-              <span>执行中 / 排队</span
-              ><strong>{{
-                runs.filter((r) => ["running", "queued"].includes(r.state))
-                  .length
-              }}</strong>
-            </div>
-            <div>
-              <span>发现相似段落对</span
-              ><strong>{{ runs.reduce((n, r) => n + r.pair_count, 0) }}</strong>
-            </div>
-          </div>
-          <el-card
-            ><el-table
-              :data="runs"
-              empty-text="暂无扫描记录，在扫描任务中点击预估并扫描"
-              ><el-table-column label="任务 / 时间" min-width="210"
-                ><template #default="{ row }"
-                  ><strong>{{
-                    row.config.task_name || taskName(row.task_id)
-                  }}</strong>
-                  <div class="muted small">
-                    {{ date(row.created_at) }}
-                  </div></template
-                ></el-table-column
-              ><el-table-column label="状态" width="110"
-                ><template #default="{ row }"
-                  ><el-tag
-                    :type="
-                      row.state === 'succeeded'
-                        ? 'success'
-                        : row.state === 'failed'
-                          ? 'danger'
-                          : 'info'
-                    "
-                    >{{ stateLabels[row.state] }}</el-tag
-                  >
-                  <div v-if="row.cancel_requested" class="small muted">
-                    正在取消
-                  </div></template
-                ></el-table-column
-              ><el-table-column label="进度" min-width="180"
-                ><template #default="{ row }"
-                  ><el-progress
-                    :percentage="
-                      row.state === 'succeeded'
-                        ? 100
-                        : row.total
-                          ? Math.min(
-                              99,
-                              Math.round((row.processed / row.total) * 100),
-                            )
-                          : 0
-                    "
-                  /><span class="small muted"
-                    >{{
-                      row.phase === "snapshot"
-                        ? "提取快照"
-                        : row.phase === "done"
-                          ? "完成"
-                          : "比较向量"
-                    }}
-                    · {{ row.processed }} / {{ row.total }} chunks</span
-                  ></template
-                ></el-table-column
-              ><el-table-column
-                prop="pair_count"
-                label="段落对"
-                width="90"
-              /><el-table-column label="操作" min-width="240"
-                ><template #default="{ row }"
-                  ><el-button text type="primary" @click="openRun(row)"
-                    >查看结果</el-button
-                  ><el-button
-                    v-if="['queued', 'running'].includes(row.state)"
-                    text
-                    type="danger"
-                    @click="runAction(row, 'cancel')"
-                    >取消</el-button
-                  ><el-button
-                    v-if="['failed', 'cancelled'].includes(row.state)"
-                    text
-                    @click="runAction(row, 'resume')"
-                    >重新扫描</el-button>
-                  <el-button v-if="['succeeded','failed','cancelled'].includes(row.state)" text type="danger" :disabled="busy" @click="deleteRun(row)">删除记录</el-button>
-                  </template
-                ></el-table-column
-              ></el-table
-            ></el-card
-          >
-          <div class="history-pager">
-            <el-button
-              :disabled="runPage === 1"
-              @click="
-                runPage--;
-                action(refresh);
-              "
-              >上一页</el-button
-            ><span>第 {{ runPage }} 页</span
-            ><el-button
-              :disabled="runs.length < 50"
-              @click="
-                runPage++;
-                action(refresh);
-              "
-              >下一页</el-button
-            >
-          </div></template
-        >
-
-        <template v-else-if="tab === 'runs' && selectedRun"
-          ><el-button text @click="selectedRun = null"
-            >← 返回扫描记录</el-button
-          >
-          <div class="page-heading">
-            <div>
-              <h1>
-                {{ selectedRun.config.task_name }}
-                <el-tag>{{ stateLabels[selectedRun.state] }}</el-tag>
-              </h1>
-            </div>
-            <el-button @click="action(loadPairs)">刷新结果</el-button>
-          </div>
-          <el-alert
-            v-if="selectedRun.error"
-            :title="selectedRun.error"
-            type="error"
-            :closable="false" /><el-alert
-            v-if="selectedRun.state !== 'succeeded'"
-            title="当前结果尚不完整，仅供查看；扫描成功后可进行人工处理。"
-            type="warning"
-            :closable="false" />
-          <div class="filters">
-            <el-select v-model="filter.status" placeholder="全部状态" clearable
-              ><el-option
-                v-for="s in ['pending', 'ignored', 'resolved', 'source_changed']"
-                :key="s"
-                :value="s"
-                :label="stateLabels[s]" /></el-select
-            ><el-input
-              v-model="filter.document"
-              placeholder="文档名称"
-              clearable
-            /><el-select
-              v-model="filter.knowledge_id"
-              class="knowledge-filter"
-              placeholder="全部知识库"
-              filterable
-              clearable
-              :loading="loadingResultKnowledge"
-              aria-label="按知识库名称筛选"
-            >
-              <el-option
-                v-for="k in resultKnowledge"
-                :key="k.id"
-                :value="k.id"
-                :label="k.name"
+        <template v-if="feature === 'duplicates'">
+          <template v-if="tab === 'sources'"
+            ><div class="page-heading">
+              <h1>数据源</h1>
+              <el-button type="primary" @click="openSource()"
+                >＋ 添加数据源</el-button
               >
-                <span>{{ k.name }}</span
-                ><small class="muted" style="float: right; margin-left: 16px">{{
-                  k.workspace_id
-                }}</small>
-              </el-option> </el-select
-            ><el-input-number
-              v-model="filter.min_score"
-              aria-label="最低相似度"
-              title="最低相似度"
-              :min="0"
-              :max="1"
-              :step="0.01"
-              :precision="2"
-            /><el-button
-              type="primary"
-              @click="
-                page = 1;
-                action(loadPairs);
-              "
-              >筛选</el-button
-            >
-          </div>
-          <div class="result-count">
-            共 {{ total }} 对相似段落
-            <span class="muted"
-              >· 任务阈值 {{ selectedRun.config.threshold }}</span
-            >
-          </div>
-          <el-empty
-            v-if="!results.length"
-            description="当前范围没有相似段落对" />
-          <article v-for="pair in results" :key="pair.id" class="pair">
-            <div class="pair-heading">
+            </div>
+            <el-empty
+              v-if="!sources.length"
+              description="添加第一个 MaxKB 数据源"
+            />
+            <div class="source-grid">
+              <el-card v-for="source in sources" :key="source.id"
+                ><div class="card-top">
+                  <div class="db-icon">DB</div>
+                  <el-tag :type="source.enabled ? 'success' : 'info'">{{
+                    source.enabled ? "已启用" : "已停用"
+                  }}</el-tag>
+                </div>
+                <h3>{{ source.name }}</h3>
+                <p v-if="source.api_only">MaxKB API 连接 · 仅知识入库</p>
+                <p v-else>
+                  {{ source.host }}:{{ source.port }} / {{ source.dbname }}
+                </p>
+                <p class="muted">
+                  {{
+                    source.api_only
+                      ? source.api_base_url
+                      : "数据库用户：" + source.user
+                  }}
+                </p>
+                <div class="card-actions source-card-actions">
+                  <el-button
+                    v-if="!source.api_only"
+                    class="source-test-button"
+                    :loading="testingSourceIds.has(source.id)"
+                    :aria-busy="testingSourceIds.has(source.id)"
+                    @click="testSourceConnection(source.id)"
+                    >测试连接</el-button
+                  ><el-button :disabled="busy" @click="openSource(source)">编辑</el-button>
+                  <el-button text type="danger" :disabled="busy" @click="deleteSource(source)"
+                    >删除</el-button
+                  >
+                </div></el-card
+              >
+            </div></template
+          >
+
+          <template v-else-if="tab === 'tasks'"
+            ><div class="page-heading">
+              <h1>扫描任务</h1>
+              <el-button type="primary" @click="openTask()"
+                >＋ 新建任务</el-button
+              >
+            </div>
+            <el-card
+              ><el-table
+                class="scan-task-table"
+                :data="tasks"
+                empty-text="暂无任务，请先配置数据源并创建任务"
+                ><el-table-column
+                  prop="name"
+                  label="任务"
+                  min-width="144"
+                  show-overflow-tooltip
+                /><el-table-column
+                  label="数据源"
+                  min-width="128"
+                  show-overflow-tooltip
+                  ><template #default="{ row }">{{
+                    sourceName(row.source_id)
+                  }}</template></el-table-column
+                ><el-table-column
+                  label="范围"
+                  width="112"
+                  class-name="task-single-line"
+                  ><template #default="{ row }"
+                    >{{ row.knowledge_ids.length }} 个知识库</template
+                  ></el-table-column
+                ><el-table-column
+                  prop="threshold"
+                  label="阈值"
+                  width="72"
+                /><el-table-column
+                  label="定时"
+                  min-width="180"
+                  class-name="task-single-line"
+                  ><template #default="{ row }"
+                    ><el-tag :type="row.enabled ? 'success' : 'info'">{{
+                      row.enabled ? row.cron : "手动 / 已暂停"
+                    }}</el-tag>
+                    <div v-if="row.enabled" class="muted small">
+                      下次 {{ date(row.next_fire) }}
+                    </div>
+                    <div v-if="row.skipped_fires" class="muted small">
+                      已跳过 {{ row.skipped_fires }} 次重叠或停用触发
+                    </div></template
+                  ></el-table-column
+                ><el-table-column
+                  label="创建时间"
+                  width="176"
+                  class-name="task-single-line"
+                  ><template #default="{ row }">{{
+                    date(row.created_at)
+                  }}</template></el-table-column
+                ><el-table-column label="操作" width="224" fixed="right"
+                  ><template #default="{ row }">
+                    <div class="task-row-actions">
+                      <el-button
+                        type="primary"
+                        plain
+                        size="small"
+                        :disabled="busy"
+                        @click="startTask(row)"
+                        >预估并扫描</el-button
+                      >
+                      <el-button
+                        text
+                        size="small"
+                        :disabled="busy"
+                        @click="openTask(row)"
+                        >编辑</el-button
+                      >
+                      <el-button
+                        text
+                        type="danger"
+                        size="small"
+                        :disabled="busy"
+                        @click="deleteTask(row)"
+                        >删除</el-button
+                      >
+                    </div>
+                  </template></el-table-column
+                ></el-table
+              ></el-card
+            ></template
+          >
+
+          <template v-else-if="tab === 'runs' && !selectedRun"
+            ><div class="page-heading">
+              <h1>扫描记录</h1>
+              <el-button @click="action(refresh)">刷新</el-button>
+            </div>
+            <div class="stats">
               <div>
-                <span class="score" title="最高相似度"
-                  >{{ (pair.similarity * 100).toFixed(2) }}%</span
-                >
+                <span>最近运行</span><strong>{{ runs.length }}</strong>
               </div>
               <div>
-                <el-tag>{{ stateLabels[pair.status] }}</el-tag
-                ><el-button
-                  text
-                  :disabled="selectedRun.state !== 'succeeded' || pair.status === 'source_changed'"
-                  @click="
-                    review(
-                      pair,
-                      pair.status === 'ignored' ? 'pending' : 'ignored',
-                    )
-                  "
-                  >{{
-                    pair.status === "ignored" ? "恢复待处理" : "忽略"
-                  }}</el-button
-                ><el-button
-                  text
-                  :disabled="selectedRun.state !== 'succeeded' || pair.status === 'source_changed'"
-                  @click="
-                    review(
-                      pair,
-                      pair.status === 'resolved' ? 'pending' : 'resolved',
-                    )
-                  "
-                  >{{
-                    pair.status === "resolved" ? "恢复待处理" : "标记已处理"
-                  }}</el-button
-                >
+                <span>执行中 / 排队</span
+                ><strong>{{
+                  runs.filter((r) => ["running", "queued"].includes(r.state))
+                    .length
+                }}</strong>
+              </div>
+              <div>
+                <span>发现相似段落对</span
+                ><strong>{{
+                  runs.reduce((n, r) => n + r.pair_count, 0)
+                }}</strong>
               </div>
             </div>
-            <div class="paragraphs">
-              <section v-for="side in ['left', 'right']" :key="side">
-                <div class="crumb">
-                  {{ pair[side].workspace_id }} /
-                  {{ pair[side].knowledge_name }}
-                </div>
-                <h3>{{ pair[side].document_name }}</h3>
-                <h4 v-if="pair[side].title">{{ pair[side].title }}</h4>
-                <pre>{{ pair[side].content }}</pre>
-                <div class="paragraph-footer">
-                  <small>段落 {{ pair[side].paragraph_id }}</small>
-                  <div>
+            <el-card
+              ><el-table
+                :data="runs"
+                empty-text="暂无扫描记录，在扫描任务中点击预估并扫描"
+                ><el-table-column label="任务 / 时间" min-width="210"
+                  ><template #default="{ row }"
+                    ><strong>{{
+                      row.config.task_name || taskName(row.task_id)
+                    }}</strong>
+                    <div class="muted small">
+                      {{ date(row.created_at) }}
+                    </div></template
+                  ></el-table-column
+                ><el-table-column label="状态" width="110"
+                  ><template #default="{ row }"
+                    ><el-tag
+                      :type="
+                        row.state === 'succeeded'
+                          ? 'success'
+                          : row.state === 'failed'
+                            ? 'danger'
+                            : 'info'
+                      "
+                      >{{ stateLabels[row.state] }}</el-tag
+                    >
+                    <div v-if="row.cancel_requested" class="small muted">
+                      正在取消
+                    </div></template
+                  ></el-table-column
+                ><el-table-column label="进度" min-width="180"
+                  ><template #default="{ row }"
+                    ><el-progress
+                      :percentage="
+                        row.state === 'succeeded'
+                          ? 100
+                          : row.total
+                            ? Math.min(
+                                99,
+                                Math.round(
+                                  (row.config.actual_comparisons
+                                    ? (row.config.processed_comparisons || 0) /
+                                      row.config.actual_comparisons
+                                    : row.processed / row.total) * 100,
+                                ),
+                              )
+                            : 0
+                      "
+                    /><span class="small muted"
+                      >{{
+                        row.phase === "snapshot"
+                          ? "提取快照"
+                          : row.phase === "done"
+                            ? "完成"
+                            : "比较向量"
+                      }}
+                      · {{ row.processed }} / {{ row.total }} chunks</span
+                    ></template
+                  ></el-table-column
+                ><el-table-column
+                  prop="pair_count"
+                  label="段落对"
+                  width="90"
+                /><el-table-column label="操作" min-width="240"
+                  ><template #default="{ row }"
+                    ><el-button text type="primary" @click="openRun(row)"
+                      >查看结果</el-button
+                    ><el-button text @click="openTiming(row)">耗时分析</el-button
+                    ><el-button
+                      v-if="['queued', 'running'].includes(row.state)"
+                      text
+                      type="danger"
+                      @click="runAction(row, 'cancel')"
+                      >取消</el-button
+                    ><el-button
+                      v-if="
+                        ['failed', 'cancelled'].includes(row.state) &&
+                        tasks.some((task) => task.id === row.task_id)
+                      "
+                      text
+                      @click="runAction(row, 'resume')"
+                      >重新扫描</el-button
+                    >
                     <el-button
+                      v-if="
+                        ['succeeded', 'failed', 'cancelled'].includes(row.state)
+                      "
+                      text
+                      type="danger"
+                      :disabled="busy"
+                      @click="deleteRun(row)"
+                      >删除记录</el-button
+                    >
+                  </template></el-table-column
+                ></el-table
+              ></el-card
+            >
+            <div class="history-pager">
+              <el-button
+                :disabled="runPage === 1"
+                @click="
+                  runPage--;
+                  action(refresh);
+                "
+                >上一页</el-button
+              ><span>第 {{ runPage }} 页</span
+              ><el-button
+                :disabled="runs.length < 50"
+                @click="
+                  runPage++;
+                  action(refresh);
+                "
+                >下一页</el-button
+              >
+            </div></template
+          >
+
+          <template v-else-if="tab === 'runs' && selectedRun"
+            ><el-button text @click="selectedRun = null"
+              >← 返回扫描记录</el-button
+            >
+            <div class="page-heading">
+              <div>
+                <h1>
+                  {{ selectedRun.config.task_name }}
+                  <el-tag>{{ stateLabels[selectedRun.state] }}</el-tag>
+                </h1>
+              </div>
+              <div>
+                <el-button @click="openTiming(selectedRun)">耗时分析</el-button>
+                <el-button @click="action(loadPairs)">刷新结果</el-button>
+              </div>
+            </div>
+            <el-alert
+              v-if="selectedRun.error"
+              :title="selectedRun.error"
+              type="error"
+              :closable="false" /><el-alert
+              v-if="selectedRun.state !== 'succeeded'"
+              title="当前结果尚不完整，仅供查看；扫描成功后可进行人工处理。"
+              type="warning"
+              :closable="false" />
+            <div class="filters">
+              <el-select
+                v-model="filter.status"
+                placeholder="全部状态"
+                clearable
+                ><el-option
+                  v-for="s in [
+                    'pending',
+                    'ignored',
+                    'resolved',
+                    'source_changed',
+                  ]"
+                  :key="s"
+                  :value="s"
+                  :label="stateLabels[s]" /></el-select
+              ><el-input
+                v-model="filter.document"
+                placeholder="文档名称"
+                clearable
+              /><el-select
+                v-model="filter.knowledge_id"
+                class="knowledge-filter"
+                placeholder="全部知识库"
+                filterable
+                clearable
+                :loading="loadingResultKnowledge"
+                aria-label="按知识库名称筛选"
+              >
+                <el-option
+                  v-for="k in resultKnowledge"
+                  :key="k.id"
+                  :value="k.id"
+                  :label="k.name"
+                >
+                  <span>{{ k.name }}</span
+                  ><small
+                    class="muted"
+                    style="float: right; margin-left: 16px"
+                    >{{ resultWorkspaceName(k) }}</small
+                  >
+                </el-option> </el-select
+              ><el-input-number
+                v-model="filter.min_score"
+                aria-label="最低相似度"
+                title="最低相似度"
+                :min="0"
+                :max="1"
+                :step="0.01"
+                :precision="2"
+              /><el-button
+                type="primary"
+                @click="
+                  page = 1;
+                  action(loadPairs);
+                "
+                >筛选</el-button
+              >
+            </div>
+            <div class="result-count">
+              共 {{ total }} 对相似段落
+              <span class="muted"
+                >· 任务阈值 {{ selectedRun.config.threshold }}</span
+              >
+            </div>
+            <el-empty
+              v-if="!results.length"
+              description="当前范围没有相似段落对" />
+            <article v-for="pair in results" :key="pair.id" class="pair">
+              <div class="pair-heading">
+                <div>
+                  <span class="score" title="最高相似度"
+                    >{{ (pair.similarity * 100).toFixed(2) }}%</span
+                  >
+                </div>
+                <div>
+                  <el-tag>{{ stateLabels[pair.status] }}</el-tag
+                  ><el-button
+                    text
+                    :disabled="
+                      selectedRun.state !== 'succeeded' ||
+                      pair.status === 'source_changed'
+                    "
+                    @click="
+                      review(
+                        pair,
+                        pair.status === 'ignored' ? 'pending' : 'ignored',
+                      )
+                    "
+                    >{{
+                      pair.status === "ignored" ? "恢复待处理" : "忽略"
+                    }}</el-button
+                  ><el-button
+                    text
+                    :disabled="
+                      selectedRun.state !== 'succeeded' ||
+                      pair.status === 'source_changed'
+                    "
+                    @click="
+                      review(
+                        pair,
+                        pair.status === 'resolved' ? 'pending' : 'resolved',
+                      )
+                    "
+                    >{{
+                      pair.status === "resolved" ? "恢复待处理" : "标记已处理"
+                    }}</el-button
+                  >
+                </div>
+              </div>
+              <div class="paragraphs">
+                <section v-for="side in ['left', 'right']" :key="side">
+                  <div class="crumb">
+                    {{ resultWorkspaceName(pair[side]) }} /
+                    {{ pair[side].knowledge_name }}
+                  </div>
+                  <h3>{{ pair[side].document_name }}</h3>
+                  <h4 v-if="pair[side].title">{{ pair[side].title }}</h4>
+                  <pre>{{ pair[side].content }}</pre>
+                  <div class="paragraph-footer">
+                    <small>段落 {{ pair[side].paragraph_id }}</small>
+                    <div>
+                      <el-button
+                        text
+                        type="primary"
+                        :disabled="selectedRun.state !== 'succeeded'"
+                        @click="edit(pair, side)"
+                        >查看当前 / 编辑</el-button
+                      ><el-button text @click="viewDocument(pair, side)"
+                        >查看整篇文档</el-button
+                      ><el-dropdown
+                        :disabled="selectedRun.state !== 'succeeded'"
+                        @command="(kind: string) => edit(pair, side, kind)"
+                        ><el-button text>删除 ▾</el-button
+                        ><template #dropdown
+                          ><el-dropdown-menu
+                            ><el-dropdown-item command="delete_paragraph"
+                              >删除此段落</el-dropdown-item
+                            ><el-dropdown-item command="delete_document"
+                              >删除整个文档</el-dropdown-item
+                            ></el-dropdown-menu
+                          ></template
+                        ></el-dropdown
+                      >
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </article>
+            <el-pagination
+              v-model:current-page="page"
+              :page-size="20"
+              :total="total"
+              layout="prev,pager,next,total"
+              @current-change="action(loadPairs)"
+          /></template>
+
+          <template v-else-if="tab === 'operations'"
+            ><div class="page-heading">
+              <h1>操作历史</h1>
+              <el-button @click="showOperations">刷新</el-button>
+            </div>
+            <el-alert
+              v-if="
+                operations.some((operation) =>
+                  ['executing', 'unknown'].includes(operation.state),
+                )
+              "
+              title="核实结果只读取源系统状态。"
+              type="info"
+              :closable="false"
+            /><el-card
+              ><el-table :data="operations" empty-text="暂无操作记录"
+                ><el-table-column label="时间" width="180"
+                  ><template #default="{ row }">{{
+                    date(row.created_at)
+                  }}</template></el-table-column
+                ><el-table-column
+                  prop="kind"
+                  label="操作类型"
+                /><el-table-column label="文档" min-width="160"
+                  ><template #default="{ row }">{{
+                    row.before?.document_name
+                  }}</template></el-table-column
+                ><el-table-column label="状态"
+                  ><template #default="{ row }"
+                    ><el-tag>{{
+                      stateLabels[row.state] || row.state
+                    }}</el-tag></template
+                  ></el-table-column
+                ><el-table-column label="文本记录"
+                  ><template #default="{ row }"
+                    ><el-button
                       text
                       type="primary"
-                      :disabled="selectedRun.state !== 'succeeded'"
-                      @click="edit(pair, side)"
-                      >查看当前 / 编辑</el-button
-                    ><el-button text @click="viewDocument(pair, side)"
-                      >查看整篇文档</el-button
-                    ><el-dropdown
-                      :disabled="selectedRun.state !== 'succeeded'"
-                      @command="(kind: string) => edit(pair, side, kind)"
-                      ><el-button text>删除 ▾</el-button
-                      ><template #dropdown
-                        ><el-dropdown-menu
-                          ><el-dropdown-item command="delete_paragraph"
-                            >删除此段落</el-dropdown-item
-                          ><el-dropdown-item command="delete_document"
-                            >删除整个文档</el-dropdown-item
-                          ></el-dropdown-menu
-                        ></template
-                      ></el-dropdown
+                      @click="
+                        operationDetail = row;
+                        operationOpen = true;
+                      "
+                      >查看前后文本</el-button
+                    ><el-button
+                      v-if="['executing', 'unknown'].includes(row.state)"
+                      text
+                      @click="operateHistory(row, 'reconcile')"
+                      >核实结果</el-button
+                    ><el-button
+                      v-if="row.state === 'draft' && row.pair_id"
+                      text
+                      @click="operateHistory(row, 'execute')"
+                      >提交</el-button
                     >
-                  </div>
-                </div>
-              </section>
-            </div>
-          </article>
-          <el-pagination
-            v-model:current-page="page"
-            :page-size="20"
-            :total="total"
-            layout="prev,pager,next,total"
-            @current-change="action(loadPairs)"
-        /></template>
-
-        <template v-else-if="tab === 'operations'"
-          ><div class="page-heading">
-            <h1>操作历史</h1>
-            <el-button @click="showOperations">刷新</el-button>
-          </div>
-          <el-alert
-            v-if="operations.some((operation) => ['executing', 'unknown'].includes(operation.state))"
-            title="核实结果只读取源系统状态。"
-            type="info"
-            :closable="false"
-          /><el-card
-            ><el-table :data="operations" empty-text="暂无操作记录"
-              ><el-table-column label="时间" width="180"
-                ><template #default="{ row }">{{
-                  date(row.created_at)
-                }}</template></el-table-column
-              ><el-table-column prop="kind" label="操作类型" /><el-table-column
-                label="文档"
-                min-width="160"
-                ><template #default="{ row }">{{
-                  row.before?.document_name
-                }}</template></el-table-column
-              ><el-table-column label="状态"
-                ><template #default="{ row }"
-                  ><el-tag>{{
-                    stateLabels[row.state] || row.state
-                  }}</el-tag></template
-                ></el-table-column
-              ><el-table-column label="文本记录"
-                ><template #default="{ row }"
-                  ><el-button
-                    text
-                    type="primary"
-                    @click="
-                      operationDetail = row;
-                      operationOpen = true;
-                    "
-                    >查看前后文本</el-button
-                  ><el-button
-                    v-if="['executing', 'unknown'].includes(row.state)"
-                    text
-                    @click="operateHistory(row, 'reconcile')"
-                    >核实结果</el-button
-                  ><el-button
-                    v-if="row.state === 'draft' && row.pair_id"
-                    text
-                    @click="operateHistory(row, 'execute')"
-                    >提交</el-button
-                  >
-                  ></template
-                ></el-table-column
-              ></el-table
-            ></el-card
-          >
-          <div class="history-pager">
-            <el-button
-              :disabled="operationPage === 1"
-              @click="
-                operationPage--;
-                showOperations();
-              "
-              >上一页</el-button
-            ><span>第 {{ operationPage }} 页</span
-            ><el-button
-              :disabled="operations.length < 50"
-              @click="
-                operationPage++;
-                showOperations();
-              "
-              >下一页</el-button
+                    ></template
+                  ></el-table-column
+                ></el-table
+              ></el-card
             >
-          </div></template
-        >
-      </template>
+            <div class="history-pager">
+              <el-button
+                :disabled="operationPage === 1"
+                @click="
+                  operationPage--;
+                  showOperations();
+                "
+                >上一页</el-button
+              ><span>第 {{ operationPage }} 页</span
+              ><el-button
+                :disabled="operations.length < 50"
+                @click="
+                  operationPage++;
+                  showOperations();
+                "
+                >下一页</el-button
+              >
+            </div></template
+          >
+        </template>
       </section>
     </div>
   </div>
 
-
-  <el-dialog v-model="passwordOpen" title="修改密码" width="min(440px, calc(100vw - 28px))"
-    :close-on-click-modal="!changingPassword" :close-on-press-escape="!changingPassword"
-    :show-close="!changingPassword" @closed="clearPasswordForm">
-    <el-form label-position="top" @submit.prevent="changePassword">
+  <el-dialog
+    align-center
+    v-model="passwordOpen"
+    title="修改密码"
+    width="min(440px, calc(100vw - 28px))"
+    :close-on-click-modal="!changingPassword"
+    :close-on-press-escape="!changingPassword"
+    :show-close="!changingPassword"
+    @closed="clearPasswordForm"
+  >
+    <el-form
+      id="change-password-form"
+      label-position="top"
+      @submit.prevent="changePassword"
+    >
       <el-form-item label="原密码">
         <el-input v-model="passwordForm.current_password" type="password" show-password
           autocomplete="current-password" :maxlength="1024" :disabled="changingPassword" />
@@ -1163,14 +1480,23 @@ onUnmounted(() => clearInterval(timer));
       </el-form-item>
       <el-alert v-if="passwordError" :title="passwordError" type="error" :closable="false" show-icon role="alert" />
       <p class="small muted">修改成功后，所有已登录会话将退出，请使用新密码重新登录。</p>
-      <div class="dialog-actions">
-        <el-button :disabled="changingPassword" @click="passwordOpen=false">取消</el-button>
-        <el-button type="primary" native-type="submit" :loading="changingPassword">确认修改</el-button>
-      </div>
     </el-form>
+    <template #footer>
+      <el-button :disabled="changingPassword" @click="passwordOpen = false"
+        >取消</el-button
+      >
+      <el-button
+        type="primary"
+        native-type="submit"
+        form="change-password-form"
+        :loading="changingPassword"
+        >确认修改</el-button
+      >
+    </template>
   </el-dialog>
 
   <el-dialog
+    align-center
     v-model="estimateOpen"
     :title="
       estimateContext.mode === 'schedule'
@@ -1208,13 +1534,21 @@ onUnmounted(() => clearInterval(timer));
         </div>
         <div>
           <span>预计处理时间</span
-          ><strong style="font-size: 20px"
-            >{{ duration(scanEstimate.seconds_low) }} ～
-            {{ duration(scanEstimate.seconds_high) }}</strong
-          >
+          ><strong style="font-size: 20px">
+            <template
+              v-if="
+                scanEstimate.seconds_low != null &&
+                scanEstimate.seconds_high != null
+              "
+            >
+              {{ duration(scanEstimate.seconds_low) }} ～
+              {{ duration(scanEstimate.seconds_high) }}
+            </template>
+            <template v-else>—</template>
+          </strong>
         </div>
       </div>
-      <el-table :data="scanEstimate.knowledge"
+      <el-table :data="scanEstimate.knowledge" max-height="min(360px, 38dvh)"
         ><el-table-column prop="name" label="知识库" /><el-table-column
           prop="documents"
           label="文档"
@@ -1233,8 +1567,14 @@ onUnmounted(() => clearInterval(timer));
           scanEstimate.basis === 'history'
             ? '根据 ' +
               scanEstimate.history_samples +
-              ' 次同数据源历史运行速度估算'
-            : '暂无可用历史速度，采用未校准经验值估算，范围较宽'
+              ' 次同配置扫描的阶段计时估算'
+            : scanEstimate.basis === 'reference'
+              ? '参考 ' +
+                scanEstimate.history_samples +
+                ' 次同范围历史阶段计时；执行配置有差异，范围较宽'
+              : scanEstimate.basis === 'empty'
+                ? '当前范围没有可比较的段落'
+                : '根据默认性能规则初始估算，完成扫描后按实测校准'
         "
         type="info"
         :closable="false"
@@ -1274,6 +1614,7 @@ onUnmounted(() => clearInterval(timer));
     >
   </el-dialog>
   <el-dialog
+    align-center
     v-model="sourceOpen"
     :title="sourceForm.id ? '编辑数据源' : '添加 MaxKB 数据源'"
     width="560px"
@@ -1358,6 +1699,7 @@ onUnmounted(() => clearInterval(timer));
     ></el-dialog
   >
   <el-dialog
+    align-center
     v-model="taskOpen"
     :title="taskForm.id ? '编辑扫描任务' : '新建扫描任务'"
     width="680px"
@@ -1371,27 +1713,81 @@ onUnmounted(() => clearInterval(timer));
             :key="s.id"
             :value="s.id"
             :label="s.name" /></el-select></el-form-item
-      ><el-form-item label="工作空间筛选"
-        ><el-select v-model="workspace" clearable placeholder="全部工作空间"
-          ><el-option
-            v-for="w in workspaces"
-            :key="w"
-            :value="w" /></el-select></el-form-item
-      ><el-form-item label="扫描知识库（可多选）"
-        ><el-select
-          v-model="taskForm.knowledge_ids"
-          multiple
-          filterable
-          :loading="loadingKnowledge"
-          placeholder="先选择数据源"
-          ><el-option
-            v-for="k in availableKnowledge"
-            :key="k.id"
-            :value="k.id"
-            :label="`${k.name} · ${k.workspace_id} · ${k.model_name || '未配置模型'}`" /></el-select
-      ></el-form-item>
-      <p v-if="taskForm.knowledge_ids.length > 1" class="small muted">
-        多库比较需使用同一向量模型。
+      >
+      <div class="form-row">
+        <el-form-item label="向量模型" for="task-model">
+          <el-select
+            id="task-model"
+            v-model="taskModelId"
+            filterable
+            :loading="loadingKnowledge"
+            :disabled="!taskForm.source_id"
+            :placeholder="taskForm.source_id ? '选择向量模型' : '先选择数据源'"
+            @change="taskModelChanged"
+          >
+            <el-option
+              v-for="group in modelGroups"
+              :key="group.id"
+              :value="group.id"
+              :label="group.label"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="工作空间筛选" for="task-workspace">
+          <el-select
+            id="task-workspace"
+            v-model="taskWorkspaceIds"
+            multiple
+            filterable
+            clearable
+            collapse-tags
+            collapse-tags-tooltip
+            :tag-tooltip="{ popperClass: 'task-knowledge-tooltip' }"
+            placeholder="全部工作空间"
+            :disabled="!taskModelId"
+          >
+            <el-option
+              v-for="group in workspaceGroups"
+              :key="group.id"
+              :value="group.id"
+              :label="group.label"
+            />
+          </el-select>
+        </el-form-item>
+      </div>
+      <el-form-item label="扫描知识库" for="task-knowledge">
+        <div class="task-knowledge-picker">
+          <el-tree-select
+            id="task-knowledge"
+            v-model="taskForm.knowledge_ids"
+            :data="taskKnowledgeTree"
+            multiple
+            show-checkbox
+            :expand-on-click-node="false"
+            filterable
+            clearable
+            collapse-tags
+            collapse-tags-tooltip
+            :tag-tooltip="{ popperClass: 'task-knowledge-tooltip' }"
+            :disabled="!taskModelId || loadingKnowledge"
+            :placeholder="taskModelId ? '选择知识库' : '先选择向量模型'"
+          >
+            <template #label="{ value }">{{
+              selectedKnowledgeLabel(value)
+            }}</template>
+          </el-tree-select>
+          <el-button
+            :disabled="!availableKnowledge.length"
+            @click="toggleAvailableKnowledge"
+            >{{ allAvailableSelected ? "取消全选" : "全选" }}</el-button
+          >
+        </div>
+      </el-form-item>
+      <p
+        v-if="!loadingKnowledge && !taskModelId && selectedKnowledgeIds.length"
+        class="small muted"
+      >
+        原有选择无法归入同一向量模型，请选择一个模型后确认扫描范围。
       </p>
       <div class="form-row">
         <el-form-item label="相似度阈值"
@@ -1401,8 +1797,8 @@ onUnmounted(() => clearInterval(timer));
             :max="1"
             :step="0.01"
             :precision="3" /></el-form-item
-        ><el-form-item label="每批 chunk 数"
-          ><el-input-number v-model="taskForm.batch_size" :min="1" :max="256"
+        ><el-form-item label="矩阵块大小"
+          ><el-input-number v-model="taskForm.batch_size" :min="1" :max="4096"
         /></el-form-item>
       </div>
       <el-form-item
@@ -1428,12 +1824,17 @@ onUnmounted(() => clearInterval(timer));
         /></el-form-item></div></el-form
     ><template #footer
       ><el-button @click="taskOpen = false">取消</el-button
-      ><el-button type="primary" :loading="busy" @click="saveTask"
+      ><el-button
+        type="primary"
+        :loading="busy"
+        :disabled="loadingKnowledge || !taskScopeValid"
+        @click="saveTask"
         >保存任务</el-button
       ></template
     ></el-dialog
   >
   <el-dialog
+    align-center
     v-model="editOpen"
     :title="
       editTarget.kind === 'update_paragraph'
@@ -1499,6 +1900,7 @@ onUnmounted(() => clearInterval(timer));
     ></el-dialog
   >
   <el-dialog
+    align-center
     v-model="documentOpen"
     :title="documentData.document_name || '文档内容'"
     width="850px"
@@ -1507,7 +1909,11 @@ onUnmounted(() => clearInterval(timer));
       <pre>{{ p.content }}</pre>
       <el-divider /></section
   ></el-dialog>
-  <el-dialog v-model="operationOpen" title="操作文本记录" width="90%"
+  <el-dialog
+    align-center
+    v-model="operationOpen"
+    title="操作文本记录"
+    width="90%"
     ><p>
       {{ date(operationDetail.created_at) }} · {{ operationDetail.kind }} ·
       {{ stateLabels[operationDetail.state] || operationDetail.state }}
@@ -1560,4 +1966,11 @@ onUnmounted(() => clearInterval(timer));
       操作人 ID：{{ operationDetail.user_id }}
     </p></el-dialog
   >
+  <RunTimingDialog
+    v-model="timingOpen"
+    :run-id="timingRun?.id || ''"
+    :task-name="timingRun?.config?.task_name || ''"
+    :profile="timingProfile"
+    @refresh="action(refresh)"
+  />
 </template>

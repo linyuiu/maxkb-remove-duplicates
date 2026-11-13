@@ -54,7 +54,9 @@ def execute_operation(operation_id, user_id, reconcile=False):
                     raise HTTPException(409, "该操作不能重复执行；结果不明确时请核实")
                 if op.user_id != user_id:
                     raise HTTPException(403, "只能执行自己创建的操作")
-                source = s.get(DataSource, op.target["source_id"])
+                source = s.get(DataSource, op.target["source_id"], with_for_update=True)
+                if not source or source.deleted_at is not None:
+                    raise HTTPException(409, "数据源已删除")
                 if not source.enabled:
                     raise HTTPException(409, "数据源已停用")
                 target, proposed, kind, before = (

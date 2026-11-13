@@ -287,8 +287,10 @@ header > div {
   box-shadow: 0 3px 8px #2746580a;
 }
 .content {
-  padding: 30px 38px 65px;
-  max-width: 1340px;
+  --content-max-width: 1340px;
+  --content-inline-padding: 38px;
+  padding: 30px var(--content-inline-padding) 65px;
+  max-width: var(--content-max-width);
   margin: auto;
 }
 .page-heading {
@@ -382,6 +384,29 @@ button:focus-visible {
 .el-table strong {
   font-weight: 550;
 }
+.scan-task-table {
+  --el-table-bg-color: #ffffff;
+  --el-table-tr-bg-color: #ffffff;
+}
+.scan-task-table .el-table__row {
+  height: 72px;
+}
+.scan-task-table td.el-table__cell {
+  padding: 12px 0;
+}
+.scan-task-table .task-single-line .cell {
+  white-space: nowrap;
+}
+.task-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.task-row-actions > .el-button {
+  flex: none;
+  margin: 0;
+}
 .source-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(285px, 1fr));
@@ -412,6 +437,21 @@ button:focus-visible {
   padding-top: 18px;
   border-top: 1px solid #ffffffb0;
 }
+.source-card-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.source-card-actions > .el-button {
+  margin: 0;
+}
+.source-card-actions > .source-test-button {
+  flex: 0 0 104px;
+  width: 104px;
+  padding-inline: 12px;
+}
+
 .stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -572,8 +612,35 @@ pre {
     inset 0 1px 0 #fff;
   backdrop-filter: blur(35px) saturate(160%);
   -webkit-backdrop-filter: blur(35px) saturate(160%);
-  padding: 26px;
+  padding: clamp(12px, 4dvh, 26px) clamp(12px, 4vw, 26px);
   max-width: calc(100vw - 30px);
+}
+.el-dialog.is-align-center {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 24px);
+}
+.el-dialog.is-align-center > .el-dialog__header,
+.el-dialog.is-align-center > .el-dialog__footer {
+  flex: none;
+}
+.el-dialog.is-align-center > .el-dialog__body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.el-dialog.is-align-center > .el-dialog__body pre {
+  max-height: none;
+  overflow: visible;
+}
+.el-dialog.is-align-center > .el-dialog__footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.el-dialog__footer > .el-button + .el-button {
+  margin-left: 0;
 }
 .el-overlay {
   background: #43576632 !important;
@@ -689,7 +756,8 @@ pre {
 }
 @media (max-width: 1100px) {
   .content {
-    padding: 25px;
+    --content-inline-padding: 25px;
+    padding: var(--content-inline-padding);
   }
   .sidebar-open .workspace {
     margin-left: 270px;
@@ -703,6 +771,16 @@ pre {
   }
   .filters .el-input {
     max-width: 190px;
+  }
+}
+@media (min-width: 901px) {
+  .content {
+    max-width: none;
+    margin-left: 0;
+    margin-right: max(0px, (100% - var(--content-max-width)) / 2);
+    padding-left: calc(
+      (var(--content-inline-padding) + max(0px, (100% - var(--content-max-width)) / 2)) / 2
+    );
   }
 }
 @media (max-width: 900px) {
@@ -928,6 +1006,22 @@ h4,
 .user-menu-trigger:hover { background: #f5f5f5; }
 .user-menu-trigger .avatar { margin-right: 0; }
 .user-menu-trigger:focus-visible { outline: 2px solid #737373; outline-offset: 2px; }
+
+.task-knowledge-picker {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+.task-knowledge-picker .el-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.task-knowledge-tooltip {
+  max-height: min(240px, 40vh);
+  max-width: min(480px, calc(100vw - 32px));
+  overflow-y: auto;
+}
 
 .vector-readiness-dialog { width: min(680px, calc(100vw - 32px)); max-width: calc(100vw - 32px); }
 .vector-readiness-dialog .el-message-box__message { max-height: 55vh; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

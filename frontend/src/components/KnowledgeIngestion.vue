@@ -24,6 +24,7 @@ function mountController(){
  :host{display:block;background:transparent;color:#202020;font-family:inherit;--text:#202020;--muted:#525252;--surface:#fff;--bg:#fafafa}
  .ingestion-root{min-height:0;margin:0;background:transparent!important;color:#202020;font-family:inherit;font-size:14px}
  .topbar{display:none!important} main{max-width:none!important;margin:0!important;padding:0!important}
+ .page-heading{margin-inline:0}.settings-panel{margin-inline-start:0}
  .card,dialog{background:#fff!important;color:#202020!important;border:1px solid #e5e5e5!important;box-shadow:0 8px 30px #00000006!important;border-radius:18px!important;backdrop-filter:none!important}
  .workspace{min-width:0}.muted,.source-hint,.queue-hint,.field-hint,.form-hint,.hint,label,small{color:#404040!important}
  h1,h2,h3,strong,.file-name,.preview-info{color:#171717!important}input,select,textarea{background:#fff!important;color:#202020!important;border-color:#d4d4d4!important;font-size:14px!important}
