@@ -20,7 +20,7 @@ function mountController(){
  const parsed=new DOMParser().parseFromString(markup,'text/html');
  shadow.innerHTML='';
  const style=document.createElement('style');
- style.textContent=styles.replaceAll(':root',':host').replace(/\bbody\b/g,'.ingestion-root')+`
+ style.textContent=styles.replaceAll(':root',':host').replace(/(?<![\w-])body(?![\w-])/g,'.ingestion-root')+`
  :host{display:block;background:transparent;color:#202020;font-family:inherit;--text:#202020;--muted:#525252;--surface:#fff;--bg:#fafafa}
  .ingestion-root{min-height:0;margin:0;background:transparent!important;color:#202020;font-family:inherit;font-size:14px}
  .topbar{display:none!important} main{max-width:none!important;margin:0!important;padding:0!important}
