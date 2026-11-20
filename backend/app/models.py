@@ -131,46 +131,31 @@ class ScanTiming(Base):
     data: Mapped[dict] = mapped_column(JSON)
 
 
-class ParagraphSnapshot(Base):
-    __tablename__ = "paragraph_snapshots"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    run_id: Mapped[str] = mapped_column(ForeignKey("scan_runs.id"), index=True)
-    paragraph_id: Mapped[str] = mapped_column(String(36))
-    data: Mapped[dict] = mapped_column(JSON)
-    __table_args__ = (UniqueConstraint("run_id", "paragraph_id"),)
+class ScanResultStorage(Base):
+    __tablename__ = "scan_result_storage"
+    run_id: Mapped[str] = mapped_column(ForeignKey("scan_runs.id"), primary_key=True)
+    pairs_table: Mapped[str] = mapped_column(String(63), unique=True)
+    paragraphs_table: Mapped[str] = mapped_column(String(63), unique=True)
+    decisions_table: Mapped[str] = mapped_column(String(63), unique=True)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
 
 
-class Pair(Base):
-    __tablename__ = "similarity_pairs"
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    run_id: Mapped[str] = mapped_column(ForeignKey("scan_runs.id"), index=True)
-    left_id: Mapped[str] = mapped_column(String(36))
-    right_id: Mapped[str] = mapped_column(String(36))
-    similarity: Mapped[float] = mapped_column(Float)
-    left_embedding_id: Mapped[str] = mapped_column(String(128))
-    right_embedding_id: Mapped[str] = mapped_column(String(128))
-    status: Mapped[str] = mapped_column(String(30), default="pending")
-    __table_args__ = (
-        UniqueConstraint("run_id", "left_id", "right_id"),
-        Index("pairs_run_score", "run_id", "similarity", "id"),
-    )
-
-
-class Decision(Base):
-    __tablename__ = "review_decisions"
-    __table_args__ = (Index("decisions_pair_id", "pair_id"),)
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    pair_id: Mapped[str] = mapped_column(ForeignKey("similarity_pairs.id"))
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
-    status: Mapped[str] = mapped_column(String(30))
-    note: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+class ScanParagraphRef(Base):
+    __tablename__ = "scan_paragraph_refs"
+    run_id: Mapped[str] = mapped_column(ForeignKey("scan_result_storage.run_id"), primary_key=True)
+    paragraph_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(36))
+    workspace_id: Mapped[str] = mapped_column(String(36))
+    knowledge_id: Mapped[str] = mapped_column(String(36))
+    document_id: Mapped[str] = mapped_column(String(36))
+    __table_args__ = (Index("scan_paragraph_identity", "source_id", "workspace_id", "knowledge_id", "document_id", "paragraph_id"),)
 
 
 class Operation(Base):
     __tablename__ = "source_operations"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    pair_id: Mapped[str | None] = mapped_column(ForeignKey("similarity_pairs.id"), nullable=True)
+    pair_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    scan_run_id: Mapped[str] = mapped_column(String(36), index=True)
     __table_args__ = (Index("operations_pair_id", "pair_id"),)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     target: Mapped[dict] = mapped_column(JSON)
@@ -192,5 +177,14 @@ class ScanEstimate(Base):
     summary: Mapped[dict] = mapped_column(JSON)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     run_id: Mapped[str | None] = mapped_column(
-        ForeignKey("scan_runs.id"), nullable=True
+        ForeignKey("scan_runs.id"), nullable=True, index=True
     )
+
+
+from sqlalchemy import event
+
+
+@event.listens_for(Run, "after_insert")
+def initialize_run_results(mapper, connection, run):
+    from .result_storage import create_storage
+    create_storage(connection, run.id)

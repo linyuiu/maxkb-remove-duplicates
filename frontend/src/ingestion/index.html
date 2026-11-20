@@ -7,11 +7,30 @@
   <link rel="stylesheet" href="/static/style.css?v=20261102.5"><script src="/static/glass-select.js?v=20261102.5" defer></script><script src="/static/app.js?v=20261102.5" defer></script><script src="/static/history.js?v=20261102.5" defer></script><script src="/static/history-cleanup.js?v=20261102.5" defer></script><script src="/static/mineru-records.js?v=20261102.5" defer></script><script src="/static/knowledge.js?v=20261102.5" defer></script><script src="/static/sources.js?v=20261102.5" defer></script>
 </head>
 <body>
-<header class="topbar"><a class="brand" href="/"><img src="/static/logo.svg" alt="" width="34" height="34"><span>文档入库工作台<small>MinerU <span aria-hidden="true">→</span> MaxKB</small></span></a><nav class="page-nav" aria-label="工作台页面"><a href="/" data-page="workbench">文档工作台</a><a href="/sources" data-page="sources">文件同步</a><a href="/history" data-page="history">历史记录</a><a href="/settings" data-page="settings">参数设置</a></nav><div class="top-actions"><span id="connection" class="connection">连接中</span></div></header>
+<header class="topbar"><a class="brand" href="/"><img src="/static/logo.svg" alt="" width="34" height="34"><span>文档入库工作台<small>MinerU <span aria-hidden="true">→</span> MaxKB</small></span></a><nav class="page-nav" aria-label="工作台页面"><a href="/" data-page="workbench">文档工作台</a><a href="/mineru" data-page="mineru">MinerU 解析记录</a><a href="/sources" data-page="sources">文件同步</a><a href="/history" data-page="history">历史记录</a><a href="/settings" data-page="settings">参数设置</a></nav><div class="top-actions"><span id="connection" class="connection">连接中</span></div></header>
 <main>
   <div class="page-heading"><h1>文档工作台</h1></div>
   <div id="notice" class="notice" role="status" hidden></div>
   <div class="layout">
+      <section id="mineru-records" class="card" aria-labelledby="mineru-records-title" hidden>
+        <div class="card-heading"><h2 id="mineru-records-title">MinerU 解析记录</h2><div class="history-record-actions"><span id="mineru-records-scope" class="badge subtle">未选择任务</span><button id="mineru-open-queue" type="button" class="button secondary small">返回文件队列</button></div></div>
+        <div class="mineru-summary" id="mineru-summary" hidden>
+          <div><strong id="mineru-total">0</strong><span>PDF 总数</span></div>
+          <div><strong id="mineru-pending">0</strong><span>待解析</span></div>
+          <div><strong id="mineru-processing">0</strong><span>进行中</span></div>
+          <div><strong id="mineru-succeeded">0</strong><span>解析成功</span></div>
+          <div><strong id="mineru-failed">0</strong><span>未完成</span></div>
+        </div>
+        <div class="mineru-toolbar">
+          <label class="mineru-batch-filter">查看批次<select id="mineru-batch" aria-label="切换解析记录批次"><option value="">暂无批次</option></select></label>
+          <label>文件筛选<input id="mineru-search" type="search" maxlength="200" placeholder="搜索 PDF 文件名或路径"></label>
+          <label>解析状态<select id="mineru-state"><option value="all">全部状态</option><option value="pending">待解析</option><option value="processing">进行中</option><option value="succeeded">解析成功</option><option value="failed">失败 / 未完成</option></select></label>
+          <button id="mineru-refresh" type="button" class="button quiet small">刷新</button>
+        </div>
+        <p id="mineru-records-message" class="source-hint padded" role="status">暂无 PDF 解析记录</p>
+        <div id="mineru-records-list"></div>
+        <div id="mineru-records-pager" class="preview-pager" hidden><button id="mineru-prev" class="button secondary small" type="button">上一页</button><span id="mineru-page"></span><button id="mineru-next" class="button secondary small" type="button">下一页</button></div>
+      </section>
     <section id="history-panel" class="card history-panel" hidden>
       <div class="card-heading"><h2>全部处理记录</h2><div class="history-record-actions"><button id="history-refresh" class="button secondary small">刷新</button><button id="history-cleanup-open" class="button quiet small danger-text">清除历史</button></div></div>
       <div id="history-summary" class="history-summary"></div>
@@ -101,15 +120,13 @@
       <section class="card document-origin"><label>文档来源<select id="document-origin"><option value="browser">上传</option><option value="mapped">映射</option><option value="ssh">同步目录</option></select></label><label id="document-sync-control" hidden>同步目录<select id="document-sync-source"></select></label><p id="document-origin-help" class="source-hint">文档在当前电脑：浏览器上传；在工作台服务器：本地映射；在其他服务器：远程 SSH 同步。</p></section>
       <section id="directory-intake" class="card" hidden><div class="card-heading"><div><h2>选择服务器文档</h2></div><span id="directory-location" class="badge subtle"></span></div><div class="directory-toolbar"><label>子目录（可选）<input id="directory-folder" placeholder="例如：部门A/设备；留空扫描根目录"></label><button id="directory-scan" class="button secondary">扫描目录</button></div><div id="directory-results" hidden><div class="directory-toolbar"><label>文件筛选<input id="directory-search" type="search" placeholder="搜索文件名或路径"></label><label>文档类型<select id="directory-kind"><option value="all">全部类型</option><option value="pdf">PDF</option><option value="word">Word</option><option value="excel">Excel</option></select></label><label>Excel 导入方式<select id="directory-excel-mode"><option value="table">表格 table</option><option value="qa">问答对 qa</option></select></label></div><div class="directory-selection"><label class="checkbox-label"><input id="directory-select-all" type="checkbox">全选筛选结果</label><span id="directory-selection-count" class="muted"></span><button id="directory-import" class="button primary" disabled>处理所选文件 →</button></div><div id="directory-file-list"></div><div class="preview-pager"><button id="directory-prev" class="button quiet small">上一页</button><span id="directory-page"></span><button id="directory-next" class="button quiet small">下一页</button></div></div><p id="directory-empty" class="source-hint padded">读取文件列表后勾选处理；SSH 来源读取工作台本机已下载文件，远程新增文件需先同步。</p><div id="directory-job-list"></div></section>
       <section class="upload-card card" aria-labelledby="upload-title"><div class="card-heading"><div><h2 id="upload-title">添加文档</h2></div></div>
-        <div class="format-upload-grid">
-          <button id="dropzone" class="format-upload dropzone" type="button" aria-label="选择 PDF 文件"><span class="format-icon">PDF</span><strong>PDF 文档</strong><span id="pending-pdf-count" class="badge subtle">0 个待上传</span></button>
-          <button id="choose-word" class="format-upload" type="button"><span class="format-icon word">W</span><strong>Word 文档</strong><span id="pending-word-count" class="badge subtle">0 个待上传</span></button>
-          <button id="choose-excel" class="format-upload" type="button"><span class="format-icon excel">X</span><strong>Excel 工作簿</strong><span id="pending-excel-count" class="badge subtle">0 个待上传</span></button>
-        </div>
+        <button id="dropzone" class="dropzone unified-upload" type="button" aria-label="选择 PDF、Word 或 Excel 文件">
+          <svg class="upload-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></svg>
+          <strong>点击选择文件，或拖拽到此处</strong>
+          <span>支持 PDF、Word、Excel，可混合多选</span>
+        </button>
         <p id="upload-limits" class="upload-limit-note"></p>
-        <input id="file-input" type="file" accept=".pdf,application/pdf" multiple hidden>
-        <input id="word-input" type="file" accept=".doc,.docx" multiple hidden>
-        <input id="excel-input" type="file" accept=".xls,.xlsx" multiple hidden>
+        <input id="file-input" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx" multiple hidden>
         <input id="folder-input" type="file" webkitdirectory multiple hidden>
         <div class="upload-actions"><button id="choose-folder" class="button quiet small">选择文件夹</button><span id="pending-label">还没有选择文件</span><button id="clear-files" class="button quiet small" hidden>清空</button><button id="start" class="button primary" disabled>开始处理 <span aria-hidden="true">→</span></button></div>
         <div id="pending-files" class="pending-files" hidden></div><div id="upload-progress" class="upload-progress" hidden><progress id="upload-bar" max="100" value="0"></progress><span id="upload-text">正在上传</span></div>
@@ -126,30 +143,12 @@
         <div class="preview-pager"><button id="wave-prev" class="button quiet small">上一组</button><span id="wave-page"></span><button id="wave-next" class="button quiet small">下一组</button></div>
       </section>
       <section class="queue-card card" aria-labelledby="queue-title">
-        <div class="card-heading"><div><h2 id="queue-title">文件队列 <span id="file-count" class="count">0</span></h2></div><span id="worker-info" class="muted"></span></div>
+        <div class="card-heading"><div><h2 id="queue-title">文件队列 <span id="file-count" class="count">0</span></h2></div><div class="history-record-actions"><span id="worker-info" class="muted"></span><button id="queue-open-mineru" type="button" class="button secondary small">查看解析记录</button></div></div>
         <div id="batch-target" class="batch-target" hidden></div>
         <div id="batch-summary" class="summary-strip" hidden><div><strong id="stat-total">0</strong><span>文件总数</span></div><div><strong id="stat-active">0</strong><span>正在处理</span></div><div><strong id="stat-ready">0</strong><span>等待入库</span></div><div><strong id="stat-done">0</strong><span>已入库</span></div></div>
         <div id="queue-empty" class="empty-state"><span class="empty-icon" aria-hidden="true">▤</span><strong>暂无文件</strong></div>
         <div id="queue-list" class="queue-list"></div>
-        <div id="queue-footer" class="queue-footer" hidden><label class="checkbox-label"><input id="select-ready" type="checkbox"><span>全选待入库文件</span></label><span id="selection-count" class="muted">已选 0 个</span><button id="import-selected" class="button primary" disabled>导入所选文件</button></div>
-      </section>
-      <section id="mineru-records" class="card" aria-labelledby="mineru-records-title">
-        <div class="card-heading"><h2 id="mineru-records-title">MinerU 解析记录</h2><span id="mineru-records-scope" class="badge subtle">未选择任务</span></div>
-        <div class="mineru-summary" id="mineru-summary" hidden>
-          <div><strong id="mineru-total">0</strong><span>PDF 总数</span></div>
-          <div><strong id="mineru-pending">0</strong><span>待解析</span></div>
-          <div><strong id="mineru-processing">0</strong><span>进行中</span></div>
-          <div><strong id="mineru-succeeded">0</strong><span>解析成功</span></div>
-          <div><strong id="mineru-failed">0</strong><span>未完成</span></div>
-        </div>
-        <div class="mineru-toolbar">
-          <label>文件筛选<input id="mineru-search" type="search" maxlength="200" placeholder="搜索 PDF 文件名或路径"></label>
-          <label>解析状态<select id="mineru-state"><option value="all">全部状态</option><option value="pending">待解析</option><option value="processing">进行中</option><option value="succeeded">解析成功</option><option value="failed">失败 / 未完成</option></select></label>
-          <button id="mineru-refresh" type="button" class="button quiet small">刷新</button>
-        </div>
-        <p id="mineru-records-message" class="source-hint padded" role="status">暂无 PDF 解析记录</p>
-        <div id="mineru-records-list"></div>
-        <div id="mineru-records-pager" class="preview-pager" hidden><button id="mineru-prev" class="button secondary small" type="button">上一页</button><span id="mineru-page"></span><button id="mineru-next" class="button secondary small" type="button">下一页</button></div>
+        <div id="queue-footer" class="queue-footer" hidden><label class="checkbox-label"><input id="select-ready" type="checkbox"><span>全选待入库文件</span></label><label class="checkbox-label"><input id="select-reparse" type="checkbox"><span>全选可重新解析 PDF</span></label><span id="selection-count" class="muted">已选 0 个</span><button id="reparse-selected" class="button secondary" disabled>重新解析所选 PDF</button><button id="import-selected" class="button primary" disabled>导入所选文件</button></div>
       </section>
       <section class="preview-card card" aria-labelledby="preview-title"><div class="card-heading"><div><h2 id="preview-title">文件预览</h2></div></div>
         <div class="preview-toolbar">
@@ -161,6 +160,7 @@
             </button>
             <div id="preview-file-panel" class="preview-file-panel" hidden>
               <div class="preview-file-panel-heading"><span id="preview-file-count">已完成切片 · 0 个文件</span><button id="preview-clear" type="button" class="button quiet small" hidden>清除选择</button></div>
+              <input id="preview-file-search" type="search" placeholder="按文件名搜索" aria-label="按文件名搜索预览文件">
               <div id="preview-file-list" class="preview-file-list" role="listbox" aria-label="可预览文件"></div>
               <p id="preview-file-empty" class="preview-file-empty">暂无可预览文件</p>
             </div>

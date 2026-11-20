@@ -16,6 +16,10 @@ from sqlalchemy.orm import sessionmaker
 
 from test_snapshot_batches import SourceStream
 
+from app.result_storage import models_for_run
+Pair = models_for_run("run").Pair
+ParagraphSnapshot = models_for_run("run").ParagraphSnapshot
+
 pytestmark = pytest.mark.skipif(
     os.environ.get("DEDUP_NATIVE_TEST_DB") != "1",
     reason="Requires real disposable PostgreSQL with separate backend sessions",
@@ -26,7 +30,7 @@ pytestmark = pytest.mark.skipif(
 def test_heartbeat_and_cancel_can_run_during_snapshot_insert(monkeypatch, cancel):
     from app import db, main, scanning
     from app.matrix import VectorStore
-    from app.models import DataSource, Task, Run, ParagraphSnapshot, now
+    from app.models import DataSource, Task, Run, now
 
     url = "postgresql+psycopg://postgres@127.0.0.1:15440/postgres?sslmode=disable"
     schema = "snapshot_concurrency_" + uuid4().hex

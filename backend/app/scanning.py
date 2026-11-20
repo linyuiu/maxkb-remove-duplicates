@@ -10,7 +10,8 @@ from sqlalchemy import select, update, func, text
 from sqlalchemy.dialects.postgresql import insert
 from .db import transaction, scan_connection
 from .profiling import RunTiming, current as current_timing, measure, timed, timed_rows, publish, count, log
-from .models import Run, Pair, DataSource, ScanTiming, now
+from .models import Run, DataSource, ScanTiming, now
+from .result_storage import result_models
 from .bulk_writer import BulkWriter, StopSignal, Stopped, Shutdown, STATE_SQL, check_state, writer_scope
 from .result_pipeline import ResultPipeline
 from .scan_diagnostics import capture_index_stats
@@ -407,6 +408,7 @@ def _execute(run_id, token, control=None):
             release_for_restart(run_id, token)
         else:
             with transaction() as s:
+                Pair = result_models(s, run_id).Pair
                 run = s.execute(
                     select(Run).where(Run.id == run_id).with_for_update(key_share=True)
                 ).scalar_one()

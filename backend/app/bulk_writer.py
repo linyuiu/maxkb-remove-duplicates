@@ -10,6 +10,8 @@ import time
 
 import psycopg
 from psycopg.types.json import Json
+from psycopg import sql
+from .result_storage import table_names
 
 from . import db
 from .profiling import measure, count, timed
@@ -107,9 +109,9 @@ def check_state(row, token):
 
 RESULT_MERGE = """
 WITH applied AS (
- INSERT INTO similarity_pairs AS p
+ INSERT INTO {pairs} AS p
  (id,run_id,left_id,right_id,similarity,left_embedding_id,right_embedding_id,status)
- SELECT gen_random_uuid()::text,%s,left_id,right_id,similarity,left_embedding_id,right_embedding_id,'pending'
+ SELECT %s||':'||gen_random_uuid()::text,%s,left_id,right_id,similarity,left_embedding_id,right_embedding_id,'pending'
  FROM scan_result_stage WHERE true
  ORDER BY left_id COLLATE "C",right_id COLLATE "C"
  ON CONFLICT (run_id,left_id,right_id) DO UPDATE SET
@@ -126,9 +128,15 @@ SELECT count(*) FILTER (WHERE inserted) AS inserted,
 """
 SNAPSHOT_MERGE = """
 WITH applied AS (
- INSERT INTO paragraph_snapshots(run_id,paragraph_id,data)
+ INSERT INTO {paragraphs}(run_id,paragraph_id,data)
  SELECT %s,paragraph_id,data FROM scan_snapshot_stage
- ON CONFLICT (run_id,paragraph_id) DO NOTHING RETURNING paragraph_id
+ ON CONFLICT (paragraph_id) DO NOTHING RETURNING paragraph_id
+), refs AS (
+ INSERT INTO scan_paragraph_refs(run_id,paragraph_id,source_id,workspace_id,knowledge_id,document_id)
+ SELECT %s,s.paragraph_id,(SELECT coalesce(r.config->>'source_id',t.source_id) FROM scan_runs r JOIN scan_tasks t ON t.id=r.task_id WHERE r.id=%s),
+        s.data->>'workspace_id',s.data->>'knowledge_id',s.data->>'document_id'
+ FROM scan_snapshot_stage s JOIN applied a USING(paragraph_id)
+ ON CONFLICT (run_id,paragraph_id) DO NOTHING
 )
 SELECT count(*) AS paragraphs,coalesce(sum(s.chunks),0)::bigint AS chunks
 FROM applied a JOIN scan_snapshot_stage s USING(paragraph_id)
@@ -228,6 +236,13 @@ class BulkWriter:
             raise Stopped("批序号不连续，已停止写入")
         return None
 
+    def _lock_storage(self):
+        row = self.conn.execute(
+            "SELECT run_id FROM scan_result_storage WHERE run_id=%s FOR SHARE", (self.run_id,)
+        ).fetchone()
+        if row is None:
+            raise Stopped("扫描结果已删除")
+
     def _copy(self, kind, rows):
         if kind == "results":
             query = "COPY scan_result_stage FROM STDIN (FORMAT BINARY)"
@@ -267,10 +282,16 @@ class BulkWriter:
                         return acknowledged
                 with measure("begin", "开始批次事务"):
                     self.conn.execute("BEGIN")
+                    self._lock_storage()
                 with batch.phase("copy"):
                     self._copy(kind,rows)
                 with batch.phase("merge"), measure("merge", "服务端批量合并及计数"):
-                    values = self.conn.execute(RESULT_MERGE if kind=="results" else SNAPSHOT_MERGE, (self.run_id,)).fetchone()
+                    names = table_names(self.run_id)
+                    statement = sql.SQL(RESULT_MERGE if kind == "results" else SNAPSHOT_MERGE).format(
+                        **{key: sql.Identifier(value) for key, value in names.items()}
+                    )
+                    parameters = (self.run_id, self.run_id) if kind == "results" else (self.run_id,) * 3
+                    values = self.conn.execute(statement, parameters).fetchone()
                 delta = dict(values,kind=kind,rows=len(rows))
                 if kind == "results":
                     delta["unchanged"] = len(rows)-delta["inserted"]-delta["updated"]
@@ -386,8 +407,9 @@ class BulkWriter:
                         return
                 self.signal.check()
                 self.conn.execute("BEGIN")
+                self._lock_storage()
                 with measure("result_count", "核对最终结果数量"):
-                    count_row=self.conn.execute("SELECT count(*) AS n FROM similarity_pairs WHERE run_id=%s",(self.run_id,)).fetchone()
+                    count_row=self.conn.execute(sql.SQL("SELECT count(*) AS n FROM {} WHERE run_id=%s").format(sql.Identifier(table_names(self.run_id)["pairs"])),(self.run_id,)).fetchone()
                 row=self.conn.execute("""UPDATE scan_runs SET state='succeeded',phase='done',finished_at=clock_timestamp(),
                     comparisons_done=%s,processed=total,cursor=total
                     WHERE id=%s AND token=%s AND state='running' AND NOT cancel_requested

@@ -168,7 +168,7 @@ def test_native_index_boundaries_flush_own_counters_and_preserve_timeouts(snapsh
     assert value["index_io"]["before"]["flush_forced"]
     assert value["index_io"]["after"]["flush_forced"]
     delta=value["index_io"]["delta"]
-    assert delta["status"]=="ok" and len(delta["indexes"])==4
+    assert delta["status"]=="ok" and len(delta["indexes"])==6
     assert sum(row["idx_blks_hit"] for row in delta["indexes"])>0
     assert all(row["idx_blks_read"]>=0 for row in delta["indexes"])
     assert value["batch_series"][0]["rows"]==1 and value["batch_series"][0]["status"]=="committed"

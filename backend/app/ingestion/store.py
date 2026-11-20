@@ -662,71 +662,108 @@ class Store(ImportStore, QueueStore, LineageStore, KnowledgeStore, TaskStopStore
                 )
                 self._event(db, row["id"])
 
-    def retry(self, file_id: str, mineru_config: dict | None = None):
+    def retry(self, file_id: str, mineru_config: dict | None = None, *, reparse: bool = False):
         retired = None
-        with self.connect() as db:
-            db.execute("SELECT pg_advisory_xact_lock(762190317)")
-            row = db.execute(
-                "SELECT f.*,b.config AS batch_config FROM files f "
-                "JOIN batches b ON b.id=f.batch_id WHERE f.id=?",
-                (file_id,),
-            ).fetchone()
-            if not row or row["status"] != "failed":
-                raise ValueError("只有明确失败的解析任务可以重试；入库失败不自动重试")
-            if not db.execute(
-                "SELECT 1 FROM intake_receipts WHERE file_id=?", (file_id,)
-            ).fetchone():
-                raise ValueError("原文件接收凭证不完整，请重新上传；此任务不能直接重试")
-            old = self.decrypt(row["batch_config"])
-            if row["mineru_config"]:
-                old.update(self.decrypt(row["mineru_config"]))
-            connection = mineru_config or {k: old[k] for k in ("mineru_url", "mineru_key")}
-            if set(connection) != {"mineru_url", "mineru_key"}:
-                raise ValueError("重试只允许更新 MinerU 连接参数")
-            changed = (
-                connection["mineru_url"].rstrip("/") != old["mineru_url"].rstrip("/")
-                or connection["mineru_key"] != old["mineru_key"]
-            )
-            # IDs and cached ZIPs belong to the previous MinerU service. Clear them before
-            # making the file claimable; always retain the original uploaded PDF.
-            if changed:
-                directory = self.directory(file_id, row["kind"])
-                for name in (
-                    "split.json",
-                    "create_payload.json",
-                ):
-                    (directory / name).unlink(missing_ok=True)
-                mineru_directory = self.mineru_directory(file_id)
-                if mineru_directory.exists():
-                    # Rename on the same filesystem is independent of the number of images.
-                    # The worker can create a fresh directory after commit; slow removal of
-                    # the old directory must not hold the repository's transaction lock.
-                    retired = mineru_directory.with_name(
-                        f".retired-{uuid.UUID(file_id).hex}-{uuid.uuid4().hex}"
+        checkpoints = []
+        if reparse:
+            self.verify_original(file_id)
+        try:
+            with self.connect() as db:
+                db.execute("SELECT pg_advisory_xact_lock(762190317)")
+                row = db.execute(
+                    "SELECT f.*,b.config AS batch_config FROM files f "
+                    "JOIN batches b ON b.id=f.batch_id WHERE f.id=?",
+                    (file_id,),
+                ).fetchone()
+                if reparse:
+                    if (not row or row["kind"] != "pdf"
+                        or row["status"] not in {"review", "import_rejected", "failed"}
+                        or row["operation_active"] or row["stop_requested"]):
+                        raise ValueError("只有等待入库、被拒绝或解析失败的 PDF 可以重新解析")
+                elif not row or row["status"] != "failed":
+                    raise ValueError("只有明确失败的解析任务可以重试；入库失败不自动重试")
+                if not db.execute(
+                    "SELECT 1 FROM intake_receipts WHERE file_id=?", (file_id,)
+                ).fetchone():
+                    raise ValueError("原文件接收凭证不完整，请重新上传；此任务不能直接重试")
+                old = self.decrypt(row["batch_config"])
+                if row["mineru_config"]:
+                    old.update(self.decrypt(row["mineru_config"]))
+                connection = mineru_config or {k: old[k] for k in ("mineru_url", "mineru_key")}
+                if set(connection) != {"mineru_url", "mineru_key"}:
+                    raise ValueError("重试只允许更新 MinerU 连接参数")
+                changed = reparse or (
+                    connection["mineru_url"].rstrip("/") != old["mineru_url"].rstrip("/")
+                    or connection["mineru_key"] != old["mineru_key"]
+                )
+                # IDs and cached ZIPs belong to the previous MinerU service. Clear them before
+                # making the file claimable; always retain the original uploaded PDF.
+                if changed:
+                    directory = self.directory(file_id, row["kind"])
+                    for name in (
+                        "split.json",
+                        "create_payload.json",
+                    ):
+                        checkpoint = directory / name
+                        if reparse and checkpoint.exists():
+                            backup = checkpoint.with_name(f".reparse-{uuid.uuid4().hex}-{name}")
+                            durable_replace(checkpoint, backup)
+                            checkpoints.append((checkpoint, backup))
+                        elif not reparse:
+                            checkpoint.unlink(missing_ok=True)
+                    mineru_directory = self.mineru_directory(file_id)
+                    if mineru_directory.exists():
+                        # Rename on the same filesystem is independent of the number of images.
+                        # The worker can create a fresh directory after commit; slow removal of
+                        # the old directory must not hold the repository's transaction lock.
+                        retired = mineru_directory.with_name(
+                            f".retired-{uuid.UUID(file_id).hex}-{uuid.uuid4().hex}"
+                        )
+                        durable_replace(mineru_directory, retired)
+                    db.execute(
+                        "UPDATE files SET source_id=NULL,job_id=NULL,job_status=NULL WHERE id=?",
+                        (file_id,),
                     )
-                    durable_replace(mineru_directory, retired)
+                # A terminal failed parse job needs a new submission; active jobs resume by ID.
+                elif row["job_status"] in {"failed", "partial", "canceled"}:
+                    db.execute("UPDATE files SET job_id=NULL,job_status=NULL WHERE id=?", (file_id,))
+                if changed or row["job_status"] != "completed" or row["parse_state"] != "succeeded":
+                    db.execute(
+                        "UPDATE files SET parse_state='pending',parse_error='',parse_started_at=NULL,"
+                        "parse_finished_at=NULL,parse_seconds=NULL WHERE id=?",
+                        (file_id,),
+                    )
+                db.execute("DELETE FROM paragraphs WHERE file_id=?", (file_id,))
                 db.execute(
-                    "UPDATE files SET source_id=NULL,job_id=NULL,job_status=NULL WHERE id=?",
-                    (file_id,),
+                    "UPDATE files SET status='queued',error='',message='等待重试',updated_at=?,"
+                    "started_at=NULL,finished_at=NULL,paragraph_count=0,document_count=0,prepared_at=NULL,"
+                    "previewed_at=NULL,mineru_config=? "
+                    "WHERE id=?",
+                    (time.time(), self.encrypt(connection), file_id),
                 )
-            # A terminal failed parse job needs a new submission; active jobs resume by ID.
-            elif row["job_status"] in {"failed", "partial", "canceled"}:
-                db.execute("UPDATE files SET job_id=NULL,job_status=NULL WHERE id=?", (file_id,))
-            if changed or row["job_status"] != "completed" or row["parse_state"] != "succeeded":
-                db.execute(
-                    "UPDATE files SET parse_state='pending',parse_error='',parse_started_at=NULL,"
-                    "parse_finished_at=NULL,parse_seconds=NULL WHERE id=?",
-                    (file_id,),
-                )
-            db.execute("DELETE FROM paragraphs WHERE file_id=?", (file_id,))
-            db.execute(
-                "UPDATE files SET status='queued',error='',message='等待重试',updated_at=?,"
-                "started_at=NULL,finished_at=NULL,paragraph_count=0,document_count=0,prepared_at=NULL,"
-                "previewed_at=NULL,mineru_config=? "
-                "WHERE id=?",
-                (time.time(), self.encrypt(connection), file_id),
-            )
-            self._event(db, file_id)
+                if reparse:
+                    resources = db.execute(
+                        "SELECT 1 FROM remote_resources WHERE file_id=? AND deleted_at IS NULL "
+                        "AND retained_at IS NULL LIMIT 1", (file_id,),
+                    ).fetchone()
+                    db.execute(
+                        "UPDATE files SET status=?,message='等待重新解析 PDF',"
+                        "cleanup_target='queued',next_check=0,reimport_requested=0,"
+                        "split_started_at=NULL,split_seconds=NULL WHERE id=?",
+                        ("cleanup_pending" if resources else "queued", file_id),
+                    )
+                self._event(db, file_id)
+        except BaseException:
+            for checkpoint, backup in reversed(checkpoints):
+                durable_replace(backup, checkpoint)
+            if reparse and retired is not None:
+                durable_replace(retired, self.mineru_directory(file_id))
+            raise
+        for checkpoint, backup in checkpoints:
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError:
+                logging.getLogger(__name__).warning("旧切片检查点暂未清理：%s", backup.name)
         if retired is not None:
             self.cleanup_retired_mineru(retired)
 

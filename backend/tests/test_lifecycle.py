@@ -34,9 +34,7 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
         DataSource,
         Task,
         Run,
-        Pair,
         Operation,
-        ParagraphSnapshot,
     )
     from app.security import encrypt, passwords
     from app.source import list_knowledge
@@ -74,7 +72,7 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
         ).scalar()
         assert (
             conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
-            == "0010"
+            == "0011"
         )
     dsn = "host=127.0.0.1 port=15439 dbname=postgres user=postgres password=postgres sslmode=disable"
     model = str(uuid4())
@@ -311,6 +309,9 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
     def record_statement(conn, cursor, statement, parameters, context, executemany):
         statements.append(statement)
 
+    from app.result_storage import models_for_run
+    models = models_for_run(rid)
+    Pair, ParagraphSnapshot, Decision = models.Pair, models.ParagraphSnapshot, models.Decision
     from app.bulk_writer import BulkWriter
     original_guard=BulkWriter._guard
     def reject_count_commit(*args):
@@ -684,7 +685,7 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
         )
         assert c.execute("SELECT count(*) FROM document").fetchone()[0] == 3
     # Deleting a run removes its scan data but preserves independent text ledgers.
-    from app.models import Decision, ScanEstimate
+    from app.models import ScanEstimate
     with db.transaction() as s:
         pending_run = enqueue(s,s.get(Task,task_id))
         pending_id = pending_run.id
@@ -707,9 +708,10 @@ def test_snapshot_resume_results_and_text_ledger(monkeypatch,tmp_path):
     with sessions() as s:
         assert s.get(Run,rid) is None and s.get(Task,task_id) is not None
         assert s.get(Run,old_rid) is not None and s.get(Run,background_id) is not None
-        assert s.scalar(select(func.count()).select_from(Pair).where(Pair.run_id==rid))==0
-        assert s.scalar(select(func.count()).select_from(ParagraphSnapshot).where(ParagraphSnapshot.run_id==rid))==0
-        assert s.scalar(select(func.count()).select_from(Decision).where(Decision.pair_id==pair_id))==0
+        from sqlalchemy import inspect
+        assert not inspect(s.connection()).has_table(models.names["pairs"])
+        assert not inspect(s.connection()).has_table(models.names["paragraphs"])
+        assert not inspect(s.connection()).has_table(models.names["decisions"])
         assert s.scalar(select(func.count()).select_from(ScanEstimate).where(ScanEstimate.run_id==rid))==0
         for oid,texts in ledgers.items():
             item=s.get(Operation,oid)

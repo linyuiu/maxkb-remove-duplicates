@@ -58,7 +58,7 @@ SELECT statement_timestamp() AS captured_at,
        s.indexrelname AS index_name,pg_relation_size(i.indexrelid) AS size_bytes,
        s.idx_blks_read,s.idx_blks_hit
 FROM pg_index i JOIN pg_statio_user_indexes s ON s.indexrelid=i.indexrelid
-WHERE i.indrelid='similarity_pairs'::regclass
+WHERE i.indrelid=to_regclass(%s)
 ORDER BY s.indexrelname
 """
 
@@ -117,7 +117,8 @@ def capture_index_stats(writer, phase):
                 with conn.transaction():
                     conn.execute("SELECT set_config('statement_timeout','2s',true),set_config('lock_timeout','500ms',true)")
                     conn.execute("SELECT pg_stat_clear_snapshot()")
-                    rows=conn.execute(INDEX_SQL).fetchall()
+                    from .result_storage import table_names
+                    rows=conn.execute(INDEX_SQL, (table_names(writer.run_id)["pairs"],)).fetchall()
                 if not rows:
                     snapshot["reason"]="no_indexes"
                 else:

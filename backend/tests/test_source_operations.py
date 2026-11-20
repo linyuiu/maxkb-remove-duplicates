@@ -13,9 +13,10 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.models import (
-    DataSource, Decision, Operation, Pair, ParagraphSnapshot, Run, Task, User,
+    DataSource, Operation, Run, Task, User,
 )
 from app.source_operations import finish
+from app.result_storage import models_for_run
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("DEDUP_DISPOSABLE_TEST_DB") != "1",
@@ -64,15 +65,15 @@ def test_mutation_matches_each_pairs_own_snapshot(connection, monkeypatch, kind)
     }
 
     def snapshot(run_id, paragraph_id, **changes):
-        return ParagraphSnapshot(
+        return models_for_run(run_id).ParagraphSnapshot(
             run_id=run_id,
             paragraph_id=paragraph_id,
             data={**target, "paragraph_id": paragraph_id, **changes},
         )
 
     def pair(key, run_id, left_id, right_id="peer", status="pending"):
-        return Pair(
-            id=key, run_id=run_id, left_id=left_id, right_id=right_id,
+        return models_for_run(run_id).Pair(
+            id=f"{run_id}:{key}", run_id=run_id, left_id=left_id, right_id=right_id,
             left_embedding_id="embedding-left", right_embedding_id="embedding-right",
             similarity=1, status=status,
         )
@@ -119,7 +120,7 @@ def test_mutation_matches_each_pairs_own_snapshot(connection, monkeypatch, kind)
         ])
         session.flush()
         session.add(Operation(
-            id="operation", pair_id="target", user_id="user", target=target,
+            id="operation", pair_id="original:target", scan_run_id="original", user_id="user", target=target,
             kind=kind, state="executing",
             before={"paragraphs": [{"id": "deleted-paragraph", "content": "original text"}]},
         ))
@@ -129,7 +130,9 @@ def test_mutation_matches_each_pairs_own_snapshot(connection, monkeypatch, kind)
     finish("operation", "user", "succeeded", actual, None, connection=connection)
 
     with Session(connection) as session:
-        assert {row.id: row.status for row in session.scalars(select(Pair))} == {
+        run_ids = session.scalars(select(Run.id)).all()
+        all_pairs = [pair for rid in run_ids for pair in session.scalars(select(models_for_run(rid).Pair))]
+        assert {row.id.split(":", 1)[1]: row.status for row in all_pairs} == {
             "target": changed_status, "shared-paragraph": changed_status,
             "same-paragraph-another-run": changed_status,
             "same-document-right": "resolved" if kind == "delete_document" else "pending",
@@ -140,13 +143,14 @@ def test_mutation_matches_each_pairs_own_snapshot(connection, monkeypatch, kind)
         operation = session.get(Operation, "operation")
         assert operation.state == "succeeded" and operation.actual == actual
         assert operation.before["paragraphs"][0]["content"] == "original text"
-        decisions = session.scalars(select(Decision)).all()
-        resolved = set(session.scalars(select(Pair.id).where(Pair.status == changed_status)))
+        decisions = [decision for rid in run_ids for decision in session.scalars(select(models_for_run(rid).Decision))]
+        resolved = {row.id for row in all_pairs if row.status == changed_status}
         assert {decision.pair_id for decision in decisions} == resolved
         assert len(decisions) == len(resolved)
         assert all(decision.status == changed_status and 'operation' in decision.note for decision in decisions)
-        pending = set(session.scalars(select(Pair.id).where(Pair.status == "pending")))
+        pending = {row.id for row in all_pairs if row.status == "pending"}
         assert not pending.intersection(resolved)
+        ParagraphSnapshot = models_for_run("original").ParagraphSnapshot
         assert session.scalar(select(ParagraphSnapshot).where(
             ParagraphSnapshot.run_id == "original",
             ParagraphSnapshot.paragraph_id == "deleted-paragraph",
@@ -161,7 +165,7 @@ def test_mutation_matches_each_pairs_own_snapshot(connection, monkeypatch, kind)
         monkeypatch.setattr(main, "transaction", lambda: atomic(connection))
         for status in ["pending", "resolved", "ignored"]:
             with pytest.raises(HTTPException) as exc:
-                main.review("target", main.ReviewBody(status=status), SimpleNamespace(id="user"))
+                main.review("original:target", main.ReviewBody(status=status), SimpleNamespace(id="user"))
             assert exc.value.status_code == 409
             assert "需重新扫描" in exc.value.detail
 
@@ -181,6 +185,8 @@ def test_audit_operation_outcomes(connection, monkeypatch, scenario, kind, expec
     from types import SimpleNamespace
     import httpx
     from cryptography.fernet import Fernet
+    Pair = models_for_run("r").Pair
+    ParagraphSnapshot = models_for_run("r").ParagraphSnapshot
     from app import source_operations as ops
     from app.security import encrypt, content_hash
     from app.maxkb_api import MaxKBAPI, document_snapshot
@@ -218,7 +224,7 @@ def test_audit_operation_outcomes(connection, monkeypatch, scenario, kind, expec
         s.add(Run(id='r',task_id='t',config={'source_id':'s'},state='succeeded'));s.flush()
         s.add(Pair(id='pair',run_id='r',left_id='p',right_id='q',left_embedding_id='e',right_embedding_id='f',similarity=1));s.flush()
         s.add(ParagraphSnapshot(run_id='r',paragraph_id='p',data=target))
-        s.add(Operation(id='op',pair_id='pair',user_id='u',target=target,kind=kind,state='unknown' if scenario=='reconcile_timeout' else 'draft',before=before,proposed={'title':'title','content':'after'} if kind=='update_paragraph' else None))
+        s.add(Operation(id='op',pair_id='pair',scan_run_id='r',user_id='u',target=target,kind=kind,state='unknown' if scenario=='reconcile_timeout' else 'draft',before=before,proposed={'title':'title','content':'after'} if kind=='update_paragraph' else None))
     result=ops.execute_operation('op','u',reconcile=scenario=='reconcile_timeout')
     assert writes==([] if scenario in {'read_timeout','read_generic','read_denied','reconcile_timeout'} else ['PUT' if kind=='update_paragraph' else 'DELETE'])
     assert result.state==expected

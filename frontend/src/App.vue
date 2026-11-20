@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, defineAsyncComponent, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { parseRoute, routeHash } from "./navigation";
+const initialRoute = parseRoute(window.location.hash);
 import { PreviewCache } from "./previewCache";
 import RunTimingDialog from "./components/RunTimingDialog.vue";
 import type { ScanTiming } from "./scanTiming";
@@ -17,16 +19,17 @@ type ScanKnowledge = {
 };
 const user = ref(""),
   ready = ref(false),
-  tab = ref("runs"),
+  tab = ref(initialRoute.feature === "duplicates" ? initialRoute.page : "runs"),
   busy = ref(false);
 const runPage = ref(1),
   operationPage = ref(1);
 const sidebarOpen = ref(window.innerWidth > 900);
-const feature=ref('duplicates');
-const ingestionLoaded=ref(false);
+const feature=ref(initialRoute.feature);
+const ingestionLoaded=ref(initialRoute.feature === "ingestion");
 watch(feature,value=>{if(value==='ingestion')ingestionLoaded.value=true});
-const ingestionPage=ref('workbench');
-const ingestionPages:Row={workbench:'文档入库',sources:'文件同步',history:'入库历史',settings:'入库设置'};
+const ingestionPage=ref(initialRoute.feature === "ingestion" ? initialRoute.page : "workbench");
+const ingestionPages:Row={workbench:'文档入库',mineru:'MinerU 解析记录',sources:'文件同步',history:'入库历史',settings:'入库设置'};
+const ingestionIcons:Row={workbench:'◫',mineru:'◷',sources:'⇄',history:'≡',settings:'⚙︎'};
 const loginForm = ref({ username: "admin", password: "" });
 const passwordOpen = ref(false), changingPassword = ref(false), passwordError = ref("");
 const passwordForm = ref({current_password:"", new_password:"", confirm_password:""});
@@ -299,6 +302,7 @@ async function login() {
     user.value = me.username;
     loginForm.value.password = "";
     await refresh();
+    await restoreRoute();
   });
 }
 async function logout() {
@@ -572,7 +576,7 @@ async function loadPairs() {
   results.value = data.items;
   total.value = data.total;
 }
-async function openRun(row: Row) {
+async function openRun(row: Row, initialPairs?: Row) {
   selectedRun.value = row;
   page.value = 1;
   filter.value = { status: "", knowledge_id: "", document: "", min_score: 0 };
@@ -588,7 +592,12 @@ async function openRun(row: Row) {
     loadingResultKnowledge.value = true;
     try {
       await Promise.all([
-        loadPairs(),
+        initialPairs ? Promise.resolve().then(() => {
+          if (selectedRun.value?.id === row.id) {
+            results.value = initialPairs.items;
+            total.value = initialPairs.total;
+          }
+        }) : loadPairs(),
         api("/runs/" + row.id + "/knowledge").then((options) => {
           if (selectedRun.value?.id === row.id) resultKnowledge.value = options;
         }),
@@ -731,11 +740,65 @@ async function showOperations() {
     operations.value = await api("/operations?page=" + operationPage.value);
   });
 }
+let applyingRoute = false;
+let routeRequest = 0;
+let appliedHash = "";
+function currentHash() {
+  return routeHash({
+    feature: feature.value,
+    page: feature.value === "ingestion" ? ingestionPage.value : tab.value,
+    runId: feature.value === "duplicates" && tab.value === "runs" ? selectedRun.value?.id : undefined,
+  });
+}
+async function restoreRoute() {
+  const request = ++routeRequest;
+  const route = parseRoute(window.location.hash);
+  appliedHash = routeHash(route);
+  window.history.replaceState(null, "", appliedHash);
+  applyingRoute = true;
+  feature.value = route.feature;
+  if (route.feature === "ingestion") ingestionPage.value = route.page;
+  else tab.value = route.page;
+  selectedRun.value = null;
+  applyingRoute = false;
+  if (!user.value || route.feature === "ingestion") return;
+  try {
+    if (route.runId) {
+      const data = await api("/runs/" + route.runId + "/pairs?page=1");
+      if (request !== routeRequest || window.location.hash !== appliedHash) return;
+      await openRun(data.run, data);
+    } else if (route.page === "operations") {
+      const data = await api("/operations?page=" + operationPage.value);
+      if (request === routeRequest) operations.value = data;
+    }
+  } catch (error: any) {
+    if (request !== routeRequest) return;
+    ElMessage.error(error.message || "页面加载失败");
+    if (route.runId) {
+      appliedHash = routeHash({feature: "duplicates", page: "runs"});
+      window.history.replaceState(null, "", appliedHash);
+    }
+  }
+}
+function browserNavigation() {
+  if (window.location.hash !== appliedHash) void restoreRoute();
+}
+watch([feature, ingestionPage, tab, () => selectedRun.value?.id], () => {
+  if (applyingRoute || !ready.value || !user.value) return;
+  const hash = currentHash();
+  if (hash === window.location.hash) return;
+  ++routeRequest;
+  appliedHash = hash;
+  window.history.pushState(null, "", hash);
+}, {flush: "sync"});
 let timer: ReturnType<typeof setInterval>;
 onMounted(async () => {
+  window.addEventListener("popstate", browserNavigation);
+  window.addEventListener("hashchange", browserNavigation);
   try {
     user.value = (await api("/me")).username;
     await refresh();
+    await restoreRoute();
   } catch {
   } finally {
     ready.value = true;
@@ -749,7 +812,11 @@ onMounted(async () => {
     } catch {}
   }, 5000);
 });
-onUnmounted(() => clearInterval(timer));
+onUnmounted(() => {
+  clearInterval(timer);
+  window.removeEventListener("popstate", browserNavigation);
+  window.removeEventListener("hashchange", browserNavigation);
+});
 </script>
 
 <template>
@@ -798,7 +865,14 @@ onUnmounted(() => clearInterval(timer));
           label="重复片段"
           value="duplicates"
       /></el-select>
-      <template v-if="feature==='ingestion'"><button v-for="(label,page) in ingestionPages" :key="page" :class="{active:ingestionPage===page}" @click="ingestionPage=String(page)">{{label}}</button></template>
+      <template v-if="feature==='ingestion'">
+        <button v-for="(label,page) in ingestionPages" :key="page"
+          :class="{active:ingestionPage===page}" :aria-current="ingestionPage===page?'page':undefined"
+          @click="ingestionPage=String(page)">
+          <span class="nav-icon" aria-hidden="true">{{ingestionIcons[page]}}</span>
+          <span>{{label}}</span>
+        </button>
+      </template>
       <template v-else>
       <button
         class="new-scan"
@@ -817,7 +891,7 @@ onUnmounted(() => clearInterval(timer));
           selectedRun = null;
         "
       >
-        ◫ <span>扫描记录</span></button
+        <span class="nav-icon" aria-hidden="true">◫</span> <span>扫描记录</span></button
       ><button
         :class="{ active: tab === 'tasks' }"
         @click="
@@ -825,7 +899,7 @@ onUnmounted(() => clearInterval(timer));
           selectedRun = null;
         "
       >
-        ◷ <span>扫描任务</span></button
+        <span class="nav-icon" aria-hidden="true">◷</span> <span>扫描任务</span></button
       ><button
         :class="{ active: tab === 'sources' }"
         @click="
@@ -833,12 +907,12 @@ onUnmounted(() => clearInterval(timer));
           selectedRun = null;
         "
       >
-        ▤ <span>数据源</span></button
+        <span class="nav-icon" aria-hidden="true">▤</span> <span>数据源</span></button
       ><button
         :class="{ active: tab === 'operations' }"
         @click="showOperations"
       >
-        ≡ <span>操作历史</span>
+        <span class="nav-icon" aria-hidden="true">≡</span> <span>操作历史</span>
       </button>
       <div v-if="runs.length" class="recent-runs">
         <div class="nav-label">最近扫描</div>
@@ -908,7 +982,7 @@ onUnmounted(() => clearInterval(timer));
         </div>
       </header>
       <section class="content">
-        <KnowledgeIngestion v-if="ingestionLoaded" v-show="feature==='ingestion'" :active="feature==='ingestion'" :page="ingestionPage" @navigate="ingestionPage=$event" @connections="feature='duplicates';tab='sources';selectedRun=null"/>
+        <KnowledgeIngestion v-if="ingestionLoaded" v-show="feature==='ingestion'" :active="feature==='ingestion'" :page="ingestionPage" @navigate="ingestionPage=$event"/>
         <template v-if="feature === 'duplicates'">
           <template v-if="tab === 'sources'"
             ><div class="page-heading">

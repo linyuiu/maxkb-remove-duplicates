@@ -1503,6 +1503,19 @@ def create_app(
             "file": public_file(store.file(file_id)),
         }
 
+    @app.post("/api/ingestion/files/{file_id}/reparse", status_code=202)
+    def reparse(file_id: str):
+        get_file(file_id)
+        store = app.state.store
+        config = store.settings(fallback=store.file_config(file_id))
+        settings_from(config)
+        try:
+            store.retry(file_id, {k: config[k] for k in ("mineru_url", "mineru_key")}, reparse=True)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        app.state.workers.wake.set()
+        return {"file": public_file(store.file(file_id))}
+
     @app.post("/api/ingestion/files/{file_id}/resplit", status_code=202)
     def resplit(file_id: str):
         if get_file(file_id)["kind"] == "excel":

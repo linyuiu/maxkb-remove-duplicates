@@ -10,6 +10,10 @@ from sqlalchemy.orm import sessionmaker
 
 from test_source_operations import connection
 
+from app.result_storage import models_for_run
+Pair = models_for_run("run").Pair
+ParagraphSnapshot = models_for_run("run").ParagraphSnapshot
+
 pytestmark = pytest.mark.skipif(
     os.environ.get("DEDUP_DISPOSABLE_TEST_DB") != "1",
     reason="Requires disposable test socket server",
@@ -103,7 +107,7 @@ def test_unfinished_mutation_blocks_deletion(source_api, state):
     from app.models import Operation
     api = source_api
     with api.sessions.begin() as s:
-        s.add(Operation(id="op", user_id="user", target={"source_id": "source"},
+        s.add(Operation(id="op", scan_run_id="run", user_id="user", target={"source_id": "source"},
                         kind="delete_document", state=state))
     result = api.client.delete("/api/sources/source", headers=HEADERS)
     assert result.status_code == 409 and "操作" in result.json()["detail"]
@@ -113,14 +117,14 @@ def test_unfinished_mutation_blocks_deletion(source_api, state):
 
 
 def test_deletion_keeps_history_and_snapshots_readable(source_api):
-    from app.models import Task, Run, Pair, ParagraphSnapshot, Operation, now
+    from app.models import Task, Run, Operation, now
     api = source_api
     with api.sessions.begin() as s:
         s.add(Task(id="task", name="task", source_id="source", knowledge_ids=[], deleted_at=now()))
         s.flush()
         s.add(Run(id="run", task_id="task", config={"source_id": "source"}, state="succeeded"))
         s.flush()
-        s.add(Pair(id="pair", run_id="run", left_id="left", right_id="right",
+        s.add(Pair(id="run:pair", run_id="run", left_id="left", right_id="right",
                    left_embedding_id="e1", right_embedding_id="e2", similarity=1))
         for paragraph_id in ("left", "right"):
             s.add(ParagraphSnapshot(run_id="run", paragraph_id=paragraph_id, data={
@@ -129,7 +133,7 @@ def test_deletion_keeps_history_and_snapshots_readable(source_api):
                 "document_id": paragraph_id, "document_name": "Document", "workspace_id": "default",
             }))
         s.flush()
-        s.add(Operation(id="op", pair_id="pair", user_id="user",
+        s.add(Operation(id="op", pair_id="run:pair", scan_run_id="run", user_id="user",
                         target={"source_id": "source", "document_id": "left"},
                         kind="update_paragraph", state="draft"))
     assert api.client.delete("/api/sources/source", headers=HEADERS).status_code == 200
@@ -138,10 +142,10 @@ def test_deletion_keeps_history_and_snapshots_readable(source_api):
     assert "snapshot text" in result.text
     assert api.client.get("/api/runs/run/knowledge").status_code == 200
     with api.sessions() as s:
-        assert s.get(Task, "task") and s.get(Run, "run") and s.get(Pair, "pair")
+        assert s.get(Task, "task") and s.get(Run, "run") and s.get(Pair, "run:pair")
         assert s.get(Operation, "op").state == "draft"
     # Source access from retained history is no longer permitted.
-    assert api.client.get("/api/pairs/pair/current/left").status_code == 404
+    assert api.client.get("/api/pairs/run:pair/current/left").status_code == 404
 
 
 def test_additive_migration_preserves_existing_source(connection):

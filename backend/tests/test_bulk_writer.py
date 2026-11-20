@@ -10,11 +10,15 @@ import pytest
 from sqlalchemy import func, select
 
 from app.bulk_writer import BulkWriter, RESULT_BATCH_ROWS, StopSignal, Stopped
-from app.models import Pair, ParagraphSnapshot, Run, now
+from app.models import Run, now
 from app.profiling import RunTiming, count, measure
 from app.result_pipeline import ResultPipeline, row_bytes
 from test_snapshot_batches import snapshot_db
 from test_source_operations import connection
+
+from app.result_storage import models_for_run
+Pair = models_for_run("run").Pair
+ParagraphSnapshot = models_for_run("run").ParagraphSnapshot
 
 pytestmark=pytest.mark.skipif(os.environ.get("DEDUP_DISPOSABLE_TEST_DB")!="1",reason="Requires disposable PostgreSQL 18")
 
@@ -61,7 +65,7 @@ def test_unknown_commit_retries_or_acknowledges_once(snapshot_db, monkeypatch, a
             delta=writer.results([match()])
             assert delta["inserted"]==1
         else:
-            delta=writer.snapshots([("p",{"content":"正文"},7)])
+            delta=writer.snapshots([("p",{"content":"正文","workspace_id":"default","knowledge_id":"knowledge","document_id":"doc"},7)])
             assert delta["chunks"]==7
         assert writer.seq==1 and writer.conn.info.backend_pid!=attempts[0]
     with snapshot_db.sessions() as s:
@@ -261,3 +265,59 @@ def test_cancellation_interrupts_in_flight_writer_query(snapshot_db,monkeypatch)
     with snapshot_db.sessions() as s:
         assert s.get(Run,"run").pair_count==0
         assert s.scalar(select(func.count()).select_from(Pair))==0
+
+
+@pytest.mark.skipif(os.environ.get("DEDUP_NATIVE_TEST_DB") != "1", reason="Needs concurrent PostgreSQL sessions")
+def test_failed_run_deletion_waits_for_inflight_writer_without_deadlock(snapshot_db, monkeypatch):
+    from sqlalchemy import event, inspect
+    from app import db, main
+    from app.result_storage import models_for_run
+    env = snapshot_db
+    staged, release, deleting = threading.Event(), threading.Event(), threading.Event()
+    outcomes = []
+    original_guard = BulkWriter._guard
+    def paused_guard(writer, seq, key, delta):
+        staged.set()
+        assert release.wait(5)
+        return original_guard(writer, seq, key, delta)
+    monkeypatch.setattr(BulkWriter, "_guard", paused_guard)
+    def write():
+        try:
+            with BulkWriter("run", "token") as writer:
+                writer.results([match()])
+        except Stopped:
+            outcomes.append("writer_stopped")
+        except BaseException as exc:
+            outcomes.append(exc)
+    def observe(conn, cursor, statement, params, context, executemany):
+        if "FROM scan_result_storage" in statement and "FOR UPDATE" in statement:
+            deleting.set()
+    def remove():
+        try:
+            outcomes.append(main.delete_run("run", SimpleNamespace(id="unused")))
+        except BaseException as exc:
+            outcomes.append(exc)
+    event.listen(db.engine, "before_cursor_execute", observe)
+    writer_thread = threading.Thread(target=write)
+    delete_thread = threading.Thread(target=remove)
+    try:
+        writer_thread.start()
+        assert staged.wait(5)
+        with env.sessions.begin() as s:
+            s.get(Run, "run").state = "failed"
+        delete_thread.start()
+        assert deleting.wait(5)
+        release.set()
+        writer_thread.join(5)
+        delete_thread.join(5)
+        assert not writer_thread.is_alive() and not delete_thread.is_alive()
+        assert "writer_stopped" in outcomes and {"ok": True} in outcomes, outcomes
+        with env.sessions() as s:
+            assert s.get(Run, "run") is None
+            assert not inspect(s.connection()).has_table(models_for_run("run").names["pairs"])
+    finally:
+        release.set()
+        writer_thread.join(5)
+        if delete_thread.ident is not None:
+            delete_thread.join(5)
+        event.remove(db.engine, "before_cursor_execute", observe)

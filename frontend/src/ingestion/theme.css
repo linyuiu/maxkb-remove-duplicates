@@ -74,3 +74,102 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 select:focus-visible, [tabindex]:focus-visible {
   outline-color: #525252;
 }
+
+.preview-file-panel { background: #f2f3f5; border-color: #d4d4d4; }
+#preview-file-search { margin: 4px 0 10px; width: 100%; }
+.preview-file-option { border-radius: 6px; background: #fff; color: #202020; }
+.preview-file-option + .preview-file-option { margin-top: 0; border-top: 1px solid #d4d4d4; }
+.preview-file-option:hover, .preview-file-option:focus-visible { background: #e8edf2; }
+.preview-file-option.selected { background: #dde7ef; color: #171717; border-color: #a8bac9; }
+.picker-file-count, .preview-file-panel-heading { color: #525252; }
+
+/* Align the ingestion workbench with the duplicate-review page layout. */
+.page-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin: 7px 0 34px;
+}
+.page-heading h1 {
+  margin: 0;
+  font-size: 29px;
+  font-weight: 580;
+  letter-spacing: -1px;
+  line-height: 1.4;
+}
+.layout { gap: 24px; }
+.card-heading, .settings-panel .card-heading { padding: 24px; }
+.card-heading h2 { font-size: 18px; font-weight: 550; }
+.button { border-radius: 11px; font-size: 14px; font-weight: 450; }
+.button.primary, .button.primary:hover:not(:disabled) {
+  background: #242424;
+  border-color: #242424;
+  box-shadow: none;
+}
+.button.secondary { background: #fff; border-color: #d4d4d4; color: #303030; box-shadow: none; }
+.button.secondary:hover:not(:disabled), .button.quiet:hover:not(:disabled) { background: #f5f5f5; }
+.button:hover:not(:disabled) { transform: none; }
+label, legend { font-size: 14px; }
+label small, .source-hint, .file-meta { font-size: 12px; color: #525252; }
+.count, .badge { background: #f2f2f2; color: #404040; border-color: #e5e5e5; }
+@media (max-width: 760px) {
+  .page-heading { align-items: flex-start; }
+  .page-heading h1 { font-size: 24px; }
+  .card-heading, .settings-panel .card-heading { padding: 15px; }
+}
+
+.mineru-toolbar { flex-wrap: wrap; }
+.mineru-toolbar .mineru-batch-filter { flex: 1 1 240px; min-width: 0; }
+.mineru-toolbar label:has(#mineru-search) { flex: 1 1 220px; width: auto; }
+.mineru-toolbar label:has(#mineru-state) { flex: 0 1 160px; width: auto; }
+
+.unified-upload {
+  width: calc(100% - 48px);
+  margin: 0 24px;
+  min-height: 156px;
+  border-radius: 14px;
+  border-color: #c6c6c6 !important;
+  background: #fafafa;
+  box-shadow: none;
+  gap: 10px;
+}
+.unified-upload:hover, .unified-upload.drag { border-color: #525252 !important; }
+.unified-upload strong { color: #262626; font-size: 15px; font-weight: 500; }
+.unified-upload > span:last-child { color: #525252; font-size: 13px; }
+.upload-symbol { width: 28px; height: 28px; color: #525252; }
+@media (max-width: 760px) {
+  .unified-upload { width: calc(100% - 30px); margin: 0 15px; }
+}
+
+/* Keep card titles, status text and controls on the same center line. */
+.card-heading, .source-job-heading {
+  align-items: center;
+  flex-wrap: wrap;
+  column-gap: 16px;
+  row-gap: 12px;
+}
+.card-heading > *, .source-job-heading > * { min-width: 0; }
+.card-heading h2 { overflow-wrap: anywhere; }
+.history-record-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  flex-shrink: 1;
+}
+.card-heading > .history-record-actions {
+  align-self: center;
+  margin-left: auto;
+}
+.history-record-actions > .muted { line-height: 1.5; }
+.card-heading > .badge { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.preview-file-panel-heading, .dialog-heading {
+  align-items: center;
+  gap: 12px;
+}
+.dialog-heading h2 { min-width: 0; overflow-wrap: anywhere; }
+.dialog-heading > button { flex-shrink: 0; }

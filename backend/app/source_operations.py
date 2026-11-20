@@ -2,10 +2,11 @@
 
 from contextlib import contextmanager
 from sqlalchemy.orm import Session
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update, insert, func, cast, String, literal
 from fastapi import HTTPException
 from . import db
-from .models import Operation, DataSource, Pair, Decision, Run, ParagraphSnapshot
+from .models import Operation, DataSource, ScanParagraphRef, ScanResultStorage
+from .result_storage import result_models
 from .maxkb_api import MaxKBAPI, APIError, document_snapshot
 from .source import document_exists
 
@@ -38,6 +39,8 @@ def execute_operation(operation_id, user_id, reconcile=False):
 
         try:
             with atomic(guard) as s:
+                if op.pair_id is not None:
+                    result_models(s, op.scan_run_id)
                 op = s.execute(
                     select(Operation)
                     .where(Operation.id == operation_id)
@@ -160,53 +163,41 @@ def execute_operation(operation_id, user_id, reconcile=False):
 def finish(operation_id, user_id, state, actual, error, connection):
     with atomic(connection) as s:
         op = s.get(Operation, operation_id)
-        op.state, op.actual, op.error = state, actual, error
+        target = op.target
+        identity = [
+            ScanParagraphRef.source_id == target["source_id"],
+            ScanParagraphRef.workspace_id == target["workspace_id"],
+            ScanParagraphRef.knowledge_id == target["knowledge_id"],
+            ScanParagraphRef.document_id == target["document_id"],
+        ]
+        if op.kind != "delete_document":
+            identity.append(ScanParagraphRef.paragraph_id == target["paragraph_id"])
+        affected = []
         if state == "succeeded":
-            pair = s.get(Pair, op.pair_id)
-            affected = [pair]
-            if op.kind in {"delete_document", "delete_paragraph", "update_paragraph"}:
-                # Match each pair against its own run's snapshots. Paragraph IDs
-                # from other sources or historical associations are not sufficient.
-                identity_filters = [
-                    ParagraphSnapshot.data[key].as_string() == op.target[key]
-                    for key in ["workspace_id", "knowledge_id", "document_id"]
-                ]
-                if op.kind != "delete_document":
-                    identity_filters.append(
-                        ParagraphSnapshot.paragraph_id == op.target["paragraph_id"]
-                    )
-                matches_target = (
-                    select(ParagraphSnapshot.id)
-                    .where(
-                        ParagraphSnapshot.run_id == Pair.run_id,
-                        (ParagraphSnapshot.paragraph_id == Pair.left_id)
-                        | (ParagraphSnapshot.paragraph_id == Pair.right_id),
-                        *identity_filters,
-                    )
-                    .correlate(Pair)
-                    .exists()
-                )
-                affected = s.scalars(
-                    select(Pair)
-                    .join(Run, Run.id == Pair.run_id)
-                    .where(
-                        Run.config["source_id"].as_string() == op.target["source_id"],
-                        matches_target,
-                    )
-                ).all()
-            status = "source_changed" if op.kind == "update_paragraph" else "resolved"
-            note = (
-                "内容已变化，需重新扫描"
-                if status == "source_changed" else "源系统操作回读确认成功"
+            run_ids = s.scalars(select(ScanParagraphRef.run_id).where(*identity).distinct()).all()
+            # Same ordered registry locks as deletion and all pair API access.
+            for run_id in sorted(run_ids):
+                storage = s.scalar(select(ScanResultStorage).where(
+                    ScanResultStorage.run_id == run_id
+                ).with_for_update())
+                if storage is not None:
+                    affected.append((run_id, result_models(s, run_id)))
+        op.state, op.actual, op.error = state, actual, error
+        s.flush()
+        for run_id, models in affected:
+            Pair, Decision = models.Pair, models.Decision
+            ids = select(ScanParagraphRef.paragraph_id).where(
+                ScanParagraphRef.run_id == run_id, *identity
             )
-            for item in affected:
-                item.status = status
-                s.add(
-                    Decision(
-                        pair_id=item.id,
-                        user_id=user_id,
-                        status=status,
-                        note=f"{note}；关联操作 {op.id}",
-                    )
-                )
+            status = "source_changed" if op.kind == "update_paragraph" else "resolved"
+            note = "内容已变化，需重新扫描" if status == "source_changed" else "源系统操作回读确认成功"
+            changed = update(Pair.__table__).where(
+                Pair.left_id.in_(ids) | Pair.right_id.in_(ids)
+            ).values(status=status).returning(Pair.id).cte("changed_pairs")
+            # Keep high-cardinality results in PostgreSQL, not Python memory.
+            s.execute(insert(Decision.__table__).from_select(
+                ["id", "pair_id", "user_id", "status", "note", "created_at"],
+                select(cast(func.gen_random_uuid(), String), changed.c.id,
+                       literal(user_id), literal(status), literal(f"{note}；关联操作 {op.id}"), func.now()),
+            ))
         return op

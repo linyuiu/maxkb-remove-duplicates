@@ -12,6 +12,10 @@ from sqlalchemy.orm import sessionmaker
 
 from test_source_operations import connection
 
+from app.result_storage import models_for_run
+Pair = models_for_run("run").Pair
+ParagraphSnapshot = models_for_run("run").ParagraphSnapshot
+
 pytestmark = pytest.mark.skipif(
     os.environ.get("DEDUP_DISPOSABLE_TEST_DB") != "1",
     reason="Requires disposable test socket server",
@@ -119,7 +123,7 @@ def run_snapshot(env, cursor):
 
 
 def test_reads_1000_and_writes_5000_with_tail(snapshot_db):
-    from app.models import Run, ParagraphSnapshot
+    from app.models import Run
     env = snapshot_db
     cursor = SourceStream(10037)
     run_snapshot(env, cursor)
@@ -134,7 +138,7 @@ def test_reads_1000_and_writes_5000_with_tail(snapshot_db):
 
 
 def test_duplicate_paragraphs_count_chunks_and_keep_one_snapshot(snapshot_db):
-    from app.models import Run, ParagraphSnapshot
+    from app.models import Run
     env = snapshot_db
     run_snapshot(env, SourceStream(6001, paragraphs=17))
     assert env.totals == [5295, 6001]
@@ -156,7 +160,7 @@ def test_empty_snapshot_has_no_write_batch(snapshot_db):
 
 
 def test_large_text_flushes_on_bytes_and_sends_single_oversized_row(snapshot_db, monkeypatch):
-    from app.models import Run, ParagraphSnapshot
+    from app.models import Run
     env = snapshot_db
     monkeypatch.setattr(env.scanning, "SNAPSHOT_BUFFER_BYTES", 20_000)
     def content(i):
@@ -172,7 +176,7 @@ def test_large_text_flushes_on_bytes_and_sends_single_oversized_row(snapshot_db,
 
 @pytest.mark.parametrize("count", [5000, 6001])
 def test_failed_counter_update_rolls_back_snapshot_rows(snapshot_db, monkeypatch, count):
-    from app.models import Run, ParagraphSnapshot
+    from app.models import Run
     from app.bulk_writer import BulkWriter
     env = snapshot_db
     cursor = SourceStream(count)
@@ -194,7 +198,7 @@ def test_failed_counter_update_rolls_back_snapshot_rows(snapshot_db, monkeypatch
 
 @pytest.mark.parametrize("cancel", [True, False])
 def test_cancellation_and_expired_lease_stop_before_full_write_batch(snapshot_db, cancel):
-    from app.models import Run, ParagraphSnapshot, now
+    from app.models import Run, now
     env = snapshot_db
     def stop(cursor, vector):
         if vector and cursor.vectors_read == 2000:
@@ -216,7 +220,7 @@ def test_cancellation_and_expired_lease_stop_before_full_write_batch(snapshot_db
 
 
 def test_oversized_paragraph_fails_without_marking_snapshot_ready(snapshot_db, monkeypatch):
-    from app.models import Run, ParagraphSnapshot
+    from app.models import Run
     env = snapshot_db
     monkeypatch.setattr(env.scanning, "SNAPSHOT_MAX_PARAGRAPH_BYTES", 1000)
     cursor = SourceStream(10, content=lambda i: "正文" * 500)
@@ -247,7 +251,7 @@ def test_copy_precedes_transaction_tail_guard(snapshot_db, monkeypatch):
 
 @pytest.mark.parametrize("cancel", [True, False])
 def test_final_fence_rejects_slow_write_and_rolls_back_batch(snapshot_db, monkeypatch, cancel):
-    from app.models import Run, ParagraphSnapshot, now
+    from app.models import Run, now
     from app.bulk_writer import BulkWriter
     env = snapshot_db
     original=BulkWriter._guard
@@ -303,7 +307,7 @@ def test_profiled_snapshot_keeps_rows_counts_and_records_transactions(snapshot_d
 
 
 def test_profiled_result_failure_rolls_back_rows_and_committed_counters(snapshot_db, monkeypatch):
-    from app.models import Run, Pair
+    from app.models import Run
     from app.profiling import RunTiming
     from app.bulk_writer import BulkWriter
     env = snapshot_db

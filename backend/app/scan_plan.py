@@ -8,7 +8,7 @@ from .db import SCAN_WORK_MEM
 from .matrix import ENGINE, MatrixSettings, available_cpus
 
 # Bump this when computation or persistence changes invalidate phase calibration.
-PLAN_VERSION = "matrix-copy-v2"
+PLAN_VERSION = "matrix-copy-per-run-v3"
 
 
 def matrix_cells(chunks, block_size):
@@ -21,7 +21,7 @@ def execution_plan(config, dimension, session, settings=None):
     settings=settings or MatrixSettings.load()
     database=session.execute(text("""SELECT pg_size_bytes(current_setting('shared_buffers')) AS shared_buffers_bytes,
         current_setting('server_version_num')::int / 10000 AS pg_major,
-        pg_indexes_size('similarity_pairs'::regclass) AS index_bytes""")).mappings().one()
+        coalesce((SELECT sum(pg_indexes_size(to_regclass(pairs_table))) FROM scan_result_storage),0)::bigint AS index_bytes""")).mappings().one()
     identity="|".join((platform.node(),platform.system(),platform.machine(),str(available_cpus())))
     return dict(version=PLAN_VERSION,engine=ENGINE,
                 matrix_block_size=settings.block_size(config["batch_size"],dimension or 1),

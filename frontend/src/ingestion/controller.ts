@@ -294,20 +294,21 @@ function kindOf(file){return file.kind || (/\.pdf$/i.test(file.name)?"pdf":/\.do
 function filePath(file){return file.webkitRelativePath||file.name;}
 function setPage(page){
   window.GlassSelect?.close();
-  const settings=page==="settings",sources=page==="sources",records=page==="history";
+  const settings=page==="settings",sources=page==="sources",records=page==="history",mineru=page==="mineru";
   document.body.classList.toggle("settings-page",settings);
   document.querySelector(".settings-panel").hidden=!settings;
   document.querySelector(".sources-panel").hidden=!sources;
-  document.querySelector(".workspace").hidden=settings||sources||records;
+  document.querySelector(".workspace").hidden=settings||sources||records||mineru;
+  $("mineru-records").hidden=!mineru;
   $("history-panel").hidden=!records;
-  document.querySelector(".page-heading h1").textContent=settings?"参数设置":sources?"文件同步":records?"历史记录":"文档工作台";
+  document.querySelector(".page-heading h1").textContent=settings?"参数设置":sources?"文件同步":records?"历史记录":mineru?"MinerU 解析记录":"文档工作台";
   for(const link of document.querySelectorAll("[data-page]"))link.setAttribute("aria-current",link.dataset.page===page?"page":"false");
   window.SourceUI?.pageChanged(page);
   window.MinerURecords?.update();
   window.HistoryUI?.pageChanged(page);
   window.WorkbenchActivity?.changed();
 }
-function currentPage(){return location.pathname==="/settings"?"settings":location.pathname==="/sources"?"sources":location.pathname==="/history"?"history":"workbench";}
+function currentPage(){return location.pathname==="/mineru"?"mineru":location.pathname==="/settings"?"settings":location.pathname==="/sources"?"sources":location.pathname==="/history"?"history":"workbench";}
 function navigatePage(page){history.pushState(null,"",page==="workbench"?"/":"/"+page);setPage(page);}
 for(const link of document.querySelectorAll("[data-page]"))link.addEventListener("click",e=>{e.preventDefault();navigatePage(link.dataset.page);});
 window.addEventListener("popstate",()=>setPage(currentPage()));
@@ -325,7 +326,10 @@ function queueNeedsPolling(){
 }
 function workbenchActivityChanged(){
   if(!workbenchVisible()){
-    connectEvents();queueController?.abort();window.MinerURecords?.suspend();return;
+    connectEvents();queueController?.abort();
+    if(currentPage()==="mineru"&&!document.hidden)window.MinerURecords?.update(true);
+    else window.MinerURecords?.suspend();
+    return;
   }
   connectEvents(true);
   refreshFolderQueue({force:true}).catch(()=>{});
@@ -420,6 +424,7 @@ async function init() {
     if(savedQueue){try{folderQueue=await api(`/api/ingestion/queues/${savedQueue}`);renderFolderQueue();}catch{localStorage.removeItem("active-queue");}}
     const remembered = new URL(location.href).searchParams.get("batch") || localStorage.getItem("active-batch");
     if(remembered) { try { await loadBatch(remembered, false); } catch { localStorage.removeItem("active-batch"); } }
+    window.MinerURecords?.update(true);
   } catch(error) { $("connection").textContent="连接异常"; $("connection").classList.add("offline"); notice(error.message,true); }
 }
 form.addEventListener("submit", async event=>{
@@ -446,7 +451,6 @@ function addFiles(files) {
   showPending();
 }
 function showPending() {
-  for(const kind of Object.keys(formatNames))$("pending-"+kind+"-count").textContent=`${pending.filter(f=>kindOf(f)===kind).length} 个待上传`;
   $("pending-label").textContent=pending.length?`已选 ${pending.length} 个 · ${size(pending.reduce((n,f)=>n+f.size,0))}`:"还没有选择文件";
   $("start").disabled=!pending.length || uploading;
   $("clear-files").hidden=!pending.length; $("pending-files").hidden=!pending.length;
@@ -471,8 +475,6 @@ function showPending() {
   }));
 }
 $("dropzone").addEventListener("click",()=>{if(!uploading)$("file-input").click();});
-$("dropzone").addEventListener("keydown",e=>{if(["Enter"," "].includes(e.key)){e.preventDefault();if(!uploading)$("file-input").click();}});
-for(const kind of ["word","excel"]){$("choose-"+kind).addEventListener("click",()=>{if(!uploading)$(kind+"-input").click();});$(kind+"-input").addEventListener("change",e=>{addFiles(e.target.files);e.target.value="";});}
 $("file-input").addEventListener("change",e=>{addFiles(e.target.files);e.target.value="";});
 $("folder-input").addEventListener("change",e=>{addFiles(e.target.files);e.target.value="";});
 $("choose-folder").addEventListener("click",()=>$("folder-input").click());
@@ -623,12 +625,25 @@ async function retryFile(file){
   }catch(error){notice(error.message,true);}
   finally{retrying.delete(file.id);renderBatch();}
 }
+let reparsing = false;
+function canReparse(file){
+  return kindOf(file)==="pdf" && ["review","import_rejected","failed"].includes(file.status)
+    && !file.stop_requested && !file.operation_active;
+}
 function selectionChanged(){
-  $("selection-count").textContent=`已选 ${selected.size} 个`;
-  $("import-selected").disabled=!selected.size;
+  const files=batch?.files.filter(f=>selected.has(f.id))||[];
+  $("selection-count").textContent=`已选 ${files.length} 个`;
+  $("import-selected").disabled=reparsing||!files.length||files.some(f=>f.status!=="review");
+  $("reparse-selected").disabled=reparsing||!files.length||files.some(f=>!canReparse(f));
+  $("reparse-selected").textContent=reparsing?"正在提交重新解析…":"重新解析所选 PDF";
   const ready=batch?.files.filter(f=>f.status==="review")||[];
   $("select-ready").checked=ready.length>0&&ready.every(f=>selected.has(f.id));
-  $("select-ready").indeterminate=selected.size>0&&!$("select-ready").checked;
+  $("select-ready").indeterminate=ready.some(f=>selected.has(f.id))&&!$("select-ready").checked;
+  const pdf=batch?.files.filter(canReparse)||[];
+  $("select-reparse").checked=pdf.length>0&&pdf.every(f=>selected.has(f.id));
+  $("select-reparse").indeterminate=pdf.some(f=>selected.has(f.id))&&!$("select-reparse").checked;
+  $("select-reparse").disabled=reparsing||!pdf.length;
+  $("select-ready").disabled=reparsing||!ready.length;
 }
 function scheduleRender(){if(renderScheduled)return;renderScheduled=true;setTimeout(()=>{renderScheduled=false;if(workbenchVisible())renderBatch();},150);}
 function reconcileChildren(parent,children){
@@ -637,7 +652,7 @@ function reconcileChildren(parent,children){
 }
 function renderBatch(){
   if(!batch)return;
-  selected=new Set([...selected].filter(id=>batch.files.some(f=>f.id===id&&f.status==="review")));
+  selected=new Set([...selected].filter(id=>batch.files.some(f=>f.id===id&&(f.status==="review"||canReparse(f)))));
   $("file-count").textContent=batch.files.length;$("queue-empty").hidden=true;$("queue-footer").hidden=false;$("batch-summary").hidden=false;
   $("stat-total").textContent=batch.files.length;$("stat-active").textContent=batch.files.filter(f=>activeStatuses.has(f.status)).length;
   $("stat-ready").textContent=batch.files.filter(f=>f.status==="review").length;$("stat-done").textContent=batch.files.filter(f=>f.status==="imported").length;
@@ -648,9 +663,9 @@ function renderBatch(){
     if(feedback&&!feedback.pending&&feedback.finalStatus!==file.status&&!["import_unknown","cleanup_failed","preparation_unknown","reconciling"].includes(file.status)){
       fileFeedback.delete(file.id);feedback=null;
     }
-    const signature=JSON.stringify([file,feedback,selected.has(file.id),retrying.has(file.id),activeStatuses.has(file.status)?elapsed(file.started_at):""]);
+    const signature=JSON.stringify([file,feedback,selected.has(file.id),retrying.has(file.id),reparsing,activeStatuses.has(file.status)?elapsed(file.started_at):""]);
     const cached=queueRows.get(file.id);if(cached?.signature===signature)return cached.row;
-    const row=el("div","file-row"),check=document.createElement("input");check.type="checkbox";check.disabled=file.status!=="review";check.checked=selected.has(file.id);check.setAttribute("aria-label",`选择 ${file.name} 入库`);
+    const row=el("div","file-row"),check=document.createElement("input");check.type="checkbox";check.disabled=reparsing||(file.status!=="review"&&!canReparse(file));check.checked=selected.has(file.id);check.setAttribute("aria-label",`选择 ${file.name}`);
     check.addEventListener("change",()=>{if(check.checked)selected.add(file.id);else selected.delete(file.id);selectionChanged();});
     const detail=el("div"),name=el("div","file-name",file.name);name.title=file.name;detail.append(name);
     const extra=file.paragraph_count?`${file.paragraph_count} 个切片${file.previewed_at?" · 已预览":""}`:activeStatuses.has(file.status)?`已用 ${elapsed(file.started_at)}`:new Date(file.created_at*1000).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"});
@@ -680,6 +695,11 @@ function renderBatch(){
       stop.addEventListener("click",async()=>{stop.disabled=true;try{const result=await api(`/api/ingestion/files/${file.id}/stop`,{method:"POST"});applyFileUpdate(result);renderBatch();}catch(e){notice(e.message,true);stop.disabled=false;}});controls.append(stop);
     }
     if(file.paragraph_count||kindOf(file)==="excel"){const view=el("button","button quiet small","预览");view.addEventListener("click",()=>selectPreview(file.id,true));controls.append(view);}
+    if(canReparse(file)){
+      const reparse=el("button","button secondary small","重新解析");
+      reparse.disabled=reparsing;
+      reparse.addEventListener("click",()=>reparseFiles([file]));controls.append(reparse);
+    }
     if(file.status==="failed"){
       const retry=el("button","button retry small",retrying.has(file.id)?"提交中…":kindOf(file)==="pdf"?"重试解析":"重试准备");
       retry.disabled=retrying.has(file.id);
@@ -729,9 +749,13 @@ function renderPreviewPicker(files=batch?.files.filter(file=>file.paragraph_coun
   $("preview-select").title=current?current.name:"选择一个文件查看切片";
   $("preview-selected-count").hidden=!current;
   $("preview-selected-count").textContent=current?kindOf(current)==="excel"?"本地工作簿":`${current.paragraph_count} 个切片`:"";
-  $("preview-file-count").textContent=`可预览 · ${files.length} 个文件`;
+  const search=$("preview-file-search").value.trim().toLocaleLowerCase();
+  const available=files.length;
+  files=files.filter(file=>file.name.toLocaleLowerCase().includes(search));
+  $("preview-file-count").textContent=search?`找到 ${files.length} / ${available} 个文件`:`可预览 · ${available} 个文件`;
   $("preview-clear").hidden=!current;
   $("preview-file-empty").hidden=files.length>0;
+  $("preview-file-empty").textContent=search?"没有匹配的文件":"暂无可预览文件";
   const signature=JSON.stringify(files.map(file=>[file.id,file.name,file.paragraph_count]));
   // Keep keyboard focus and scroll position when unrelated SSE events refresh the queue.
   if(signature!==previewFilesSignature){
@@ -754,10 +778,12 @@ function setPreviewPickerOpen(open,focus=false){
   $("preview-select").setAttribute("aria-expanded",String(open));
   if(focus)$("preview-select").focus({preventScroll:true});
 }
+$("preview-file-search").addEventListener("input",()=>renderPreviewPicker());
 $("preview-select").addEventListener("click",()=>setPreviewPickerOpen($("preview-file-panel").hidden));
 $("preview-clear").addEventListener("click",()=>selectPreview(""));
 $("preview-picker").addEventListener("keydown",event=>{
   if(event.key==="Escape"){event.preventDefault();setPreviewPickerOpen(false,true);return;}
+  if(event.target===$("preview-file-search")&&event.key!=="ArrowDown")return;
   if(!["ArrowDown","ArrowUp","Home","End"].includes(event.key))return;
   event.preventDefault();setPreviewPickerOpen(true);
   const options=Array.from($("preview-file-list").children);
@@ -844,9 +870,36 @@ function localImageGallery(fileId,count,unmapped){
 }
 $("preview-prev").addEventListener("click",()=>{offset=Math.max(0,offset-20);fetchPreview();});
 $("preview-next").addEventListener("click",()=>{if(offset+20<previewTotal){offset+=20;fetchPreview();}});
+async function reparseFiles(files){
+  if(reparsing||!files.length||files.some(file=>!canReparse(file)))return;
+  if(!window.confirm(`确认重新解析 ${files.length} 个 PDF？旧解析结果与切片会被清除，然后重新提交 MinerU。`))return;
+  const batchId=batch.id;
+  reparsing=true;renderBatch();
+  let succeeded=0;
+  const failures=[];
+  try{
+    for(const file of files){
+      try{
+        const result=await api(`/api/ingestion/files/${file.id}/reparse`,{method:"POST"});
+        if(batch?.id===batchId){
+          applyFileUpdate(result.file);selected.delete(file.id);
+          if(previewId===file.id){previewId="";clearPreview();}
+        }
+        succeeded++;
+      }catch(error){failures.push(`${file.name}：${error.message}`);}
+    }
+    connectEvents(true);
+    notice(`已提交 ${succeeded} 个 PDF 重新解析`+(failures.length?`，${failures.length} 个失败。\n${failures.join("\n")}`:"。"),failures.length>0);
+  }finally{reparsing=false;renderBatch();}
+}
+$("reparse-selected").addEventListener("click",()=>reparseFiles(batch.files.filter(f=>selected.has(f.id))));
+$("select-reparse").addEventListener("change",()=>{
+  selected=$("select-reparse").checked?new Set(batch.files.filter(canReparse).map(f=>f.id)):new Set();
+  renderBatch();
+});
 $("resplit").addEventListener("click",async()=>{if(!previewId)return;const id=previewId;$("resplit").disabled=true;try{await api(`/api/ingestion/files/${id}/resplit`,{method:"POST"});connectEvents(true);previewId="";clearPreview();notice("已排队重新切片，完成后请选择这个文件重新预览。");}catch(error){notice(error.message,true);}});
 $("import-selected").addEventListener("click",()=>{
-  importIds=[...selected];importBatchId=batch.id;if(!importIds.length)return;
+  importIds=[...selected];importBatchId=batch.id;if(reparsing||!importIds.length||batch.files.some(f=>selected.has(f.id)&&f.status!=="review"))return;
   const files=batch.files.filter(f=>importIds.includes(f.id));
   $("import-description").textContent=`将 ${files.length} 个文件导入 MaxKB。PDF/Word 使用已预览的切片，Excel 使用各文件选择的表格或问答对模式。`;
   $("import-target").replaceChildren();
@@ -1213,24 +1266,50 @@ async function fetchWorkbook(){
   let lastFetched = 0, signature = "", searchTimer,settled=false;
   function suspend(){controller?.abort();controller=null;request++;}
 
+  let selectedBatch = "", batchParent = "", batchOptionsSignature = "";
+  function syncBatches() {
+    const queueId=batch?.queue_id||folderQueue?.id||"";
+    const parent=queueId||batch?.id||"";
+    const waves=folderQueue?.id===queueId?folderQueue.batches:batch?[batch]:[];
+    if(parent!==batchParent){
+      batchParent=parent;
+      selectedBatch=batch?.queue_id===queueId||!queueId?batch?.id||"":"";
+    }
+    if(selectedBatch&&!waves.some(wave=>wave.id===selectedBatch))selectedBatch="";
+    const nextSignature=JSON.stringify([parent,waves.map(wave=>[wave.id,wave.ordinal,wave.name,wave.total])]);
+    if(nextSignature!==batchOptionsSignature){
+      batchOptionsSignature=nextSignature;
+      const options=[];
+      if(queueId){const all=el("option","","全部批次");all.value="";options.push(all);}
+      for(const wave of waves){
+        const label=`第 ${(wave.ordinal||0)+1} 批`+(wave.name?` · ${wave.name}`:"")+(wave.total!=null?` · ${wave.total} 个文件`:"");
+        const option=el("option","",label);option.value=wave.id;options.push(option);
+      }
+      if(!options.length){const empty=el("option","","暂无批次");empty.value="";options.push(empty);}
+      $("mineru-batch").replaceChildren(...options);
+    }
+    $("mineru-batch").disabled=!waves.length;
+    $("mineru-batch").value=selectedBatch;
+    return queueId;
+  }
   function scope() {
-    if(batch?.queue_id)return {queue_id:batch.queue_id};
-    if(batch)return {batch_id:batch.id};
-    if(folderQueue)return {queue_id:folderQueue.id};
+    const queueId=syncBatches();
+    if(selectedBatch)return {batch_id:selectedBatch};
+    if(queueId)return {queue_id:queueId};
     return null;
   }
   async function update(force = false) {
-    if(currentPage() !== "workbench" || document.hidden)return;
+    if(currentPage() !== "mineru" || document.hidden){suspend();return;}
     const context = scope(), key = JSON.stringify(context);
     if(key !== scopeKey) {
       scopeKey = key;pageOffset = 0;signature = "";settled=false;
       $("mineru-records-list").replaceChildren();
       $("mineru-summary").hidden = true;$("mineru-records-pager").hidden = true;
-      $("mineru-records-message").textContent = context?"加载中…":"暂无 PDF 解析记录";
+      $("mineru-records-message").textContent = context?"加载中…":"请先在文档入库或入库历史中打开任务，再查看对应的解析记录。";
       $("mineru-records-message").hidden = false;
       force = true;
     }
-    $("mineru-records-scope").textContent = context?.queue_id?"当前队列 · 全部批次":context?"当前批次":"未选择任务";
+    $("mineru-records-scope").textContent = context?.queue_id?"当前任务 · 全部批次":context?$("mineru-batch").selectedOptions[0]?.textContent||"当前批次":"未选择任务";
     if(!context) {controller?.abort();request++;return;}
     const localPending=batch?.files?.some(f=>f.kind==="pdf"&&["pending","uploading","waiting","running"].includes(f.parse_state));
     if(!force&&settled&&!localPending)return;
@@ -1294,7 +1373,7 @@ async function fetchWorkbook(){
           try {await retryFile(file);await update(true);}finally {retry.disabled = false;}
         });controls.append(retry);
       }
-      if(file.batch_id !== batch?.id) {
+      {
         const open = el("button","button quiet small","打开批次");
         open.addEventListener("click",async()=>{try {await loadBatch(file.batch_id);$("queue-title").scrollIntoView({behavior:"smooth",block:"start"});}catch(error){notice(error.message,true);}});
         controls.append(open);
@@ -1306,9 +1385,21 @@ async function fetchWorkbook(){
     $("mineru-prev").disabled = pageOffset === 0;
     $("mineru-next").disabled = pageOffset + pageSize >= result.total;
   }
+  $("mineru-batch").addEventListener("change",()=>{
+    selectedBatch=$("mineru-batch").value;
+    suspend();pageOffset=0;update(true);
+  });
   $("mineru-state").addEventListener("change",()=>{pageOffset = 0;update(true);});
   $("mineru-search").addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer = setTimeout(()=>{pageOffset = 0;update(true);},300);});
   $("mineru-refresh").addEventListener("click",()=>update(true));
+  $("queue-open-mineru").addEventListener("click",()=>navigatePage("mineru"));
+  $("mineru-open-queue").addEventListener("click",async()=>{
+    try{
+      if(selectedBatch&&selectedBatch!==batch?.id)await loadBatch(selectedBatch);
+      else navigatePage("workbench");
+      $("queue-title").scrollIntoView({behavior:"smooth",block:"start"});
+    }catch(error){notice(error.message,true);}
+  });
   $("mineru-prev").addEventListener("click",()=>{pageOffset = Math.max(0,pageOffset-pageSize);update(true);});
   $("mineru-next").addEventListener("click",()=>{if(pageOffset+pageSize < total){pageOffset += pageSize;update(true);}});
   window.MinerURecords = {update,suspend};

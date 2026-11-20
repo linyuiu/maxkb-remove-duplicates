@@ -7,8 +7,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sqlalchemy import select, delete, func, or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select, delete, func, text, or_
+from sqlalchemy.exc import IntegrityError, OperationalError
 from psycopg.conninfo import make_conninfo, conninfo_to_dict
 from .db import Session, transaction
 from .models import (
@@ -17,9 +17,8 @@ from .models import (
     DataSource,
     Task,
     Run,
-    Pair,
-    ParagraphSnapshot,
-    Decision,
+    ScanResultStorage,
+    ScanParagraphRef,
     Operation,
     now,
     ScanEstimate,
@@ -45,6 +44,7 @@ from .maxkb_api import (
     document_hash,
 )
 from .source_operations import execute_operation
+from .result_storage import result_models, get_pair
 
 
 @asynccontextmanager
@@ -684,33 +684,44 @@ def runs(page: int = 1, s=Depends(db), user=Depends(auth)):
 
 @app.delete("/api/runs/{run_id}")
 def delete_run(run_id: str, user=Depends(auth)):
-    with transaction() as s:
-        run = get(s, Run, run_id)
-        # Match scan confirmation's task -> run lock order.
-        s.execute(select(Task.id).where(Task.id == run.task_id).with_for_update()).scalar_one()
-        run = s.execute(select(Run).where(Run.id == run_id).with_for_update(key_share=True)
-                        .execution_options(populate_existing=True)).scalar_one_or_none()
-        if not run:
-            raise HTTPException(404, "扫描记录不存在")
-        if run.state not in {"succeeded", "failed", "cancelled"}:
-            raise HTTPException(409, "请先取消扫描，等待任务停止后再删除")
-        # Foreign keys roll back deletion if a new draft is inserted concurrently.
-        pair_ids = select(Pair.id).where(Pair.run_id == run_id)
-        operations = s.scalars(select(Operation).where(Operation.pair_id.in_(pair_ids))
-                              .order_by(Operation.id).with_for_update()).all()
-        if any(op.state in {"executing", "unknown"} for op in operations):
-            raise HTTPException(409, "本次扫描有正在执行或待核实的源系统操作，请先处理后再删除")
-        for op in operations:
-            op.target = {**op.target, "scan_run_id": run.id, "scan_task_name": run.config.get("task_name", ""),
-                         "scan_pair_id": op.pair_id}
-            op.pair_id = None
-        s.flush()
-        # Remove consumed confirmations so they cannot recreate the deleted run.
-        s.execute(delete(ScanEstimate).where(ScanEstimate.run_id == run_id))
-        s.execute(delete(Decision).where(Decision.pair_id.in_(pair_ids)))
-        s.execute(delete(Pair).where(Pair.run_id == run_id))
-        s.execute(delete(ParagraphSnapshot).where(ParagraphSnapshot.run_id == run_id))
-        s.delete(run)
+    try:
+        with transaction() as s:
+            s.execute(text("SET LOCAL lock_timeout = '5s'"))
+            run = get(s, Run, run_id)
+            # Global order: task (when needed), storage registry, run, operation.
+            s.execute(select(Task.id).where(Task.id == run.task_id).with_for_update()).scalar_one()
+            models = result_models(s, run_id, exclusive=True)
+            run = s.execute(select(Run).where(Run.id == run_id).with_for_update(key_share=True)
+                            .execution_options(populate_existing=True)).scalar_one_or_none()
+            if not run:
+                raise HTTPException(404, "扫描记录不存在")
+            if run.state not in {"succeeded", "failed", "cancelled"}:
+                raise HTTPException(409, "请先取消扫描，等待任务停止后再删除")
+            active = s.scalar(select(Operation.id).where(
+                Operation.scan_run_id == run_id,
+                Operation.state.in_(["executing", "unknown"]),
+            ).limit(1))
+            if active:
+                raise HTTPException(409, "本次扫描有正在执行或待核实的源系统操作，请先处理后再删除")
+            # Preserve text history in one SQL update, without loading paragraph bodies.
+            from sqlalchemy import cast, update
+            from sqlalchemy.dialects.postgresql import JSONB
+            s.execute(update(Operation).where(Operation.scan_run_id == run_id).values(
+                target=cast(cast(Operation.target, JSONB).op("||")(func.jsonb_build_object(
+                    "scan_run_id", run_id, "scan_task_name", run.config.get("task_name", ""),
+                    "scan_pair_id", Operation.pair_id,
+                )), JSONB), pair_id=None,
+            ).execution_options(synchronize_session=False))
+            # Drop whole physical tables; never DELETE millions of result rows.
+            models.metadata.drop_all(s.connection(), checkfirst=False)
+            s.execute(delete(ScanParagraphRef).where(ScanParagraphRef.run_id == run_id))
+            s.execute(delete(ScanEstimate).where(ScanEstimate.run_id == run_id))
+            s.execute(delete(ScanResultStorage).where(ScanResultStorage.run_id == run_id))
+            s.delete(run)
+    except OperationalError as exc:
+        if getattr(exc.orig, "sqlstate", None) == "55P03":
+            raise HTTPException(409, "扫描结果正在被访问或处理，删除等待超时，请稍后重试") from None
+        raise
     return {"ok": True}
 
 
@@ -758,6 +769,7 @@ def run_workspaces(run_id: str, user=Depends(auth)):
 @app.get("/api/runs/{run_id}/knowledge")
 def run_knowledge(run_id: str, s=Depends(db), user=Depends(auth)):
     get(s, Run, run_id)
+    ParagraphSnapshot = result_models(s, run_id).ParagraphSnapshot
     data = ParagraphSnapshot.data
     query = (
         select(
@@ -785,6 +797,8 @@ def pairs(
     user=Depends(auth),
 ):
     run = get(s, Run, run_id)
+    models = result_models(s, run_id)
+    Pair, ParagraphSnapshot = models.Pair, models.ParagraphSnapshot
     q = select(Pair).where(Pair.run_id == run_id, Pair.similarity >= min_score)
     if status:
         q = q.where(Pair.status == status)
@@ -841,7 +855,8 @@ class ReviewBody(BaseModel):
 @app.post("/api/pairs/{pair_id}/review")
 def review(pair_id: str, body: ReviewBody, user=Depends(auth)):
     with transaction() as s:
-        pair = get(s, Pair, pair_id)
+        pair, models = get_pair(s, pair_id)
+        Decision = models.Decision
         if get(s, Run, pair.run_id).state != "succeeded":
             raise HTTPException(409, "完整扫描成功后才能处理")
         if pair.status == "source_changed":
@@ -856,7 +871,8 @@ def review(pair_id: str, body: ReviewBody, user=Depends(auth)):
 
 
 def pair_target(s, pair_id, side):
-    pair = get(s, Pair, pair_id)
+    pair, models = get_pair(s, pair_id)
+    ParagraphSnapshot = models.ParagraphSnapshot
     run = get(s, Run, pair.run_id)
     if side not in ["left", "right"]:
         raise HTTPException(400, "无效的段落方向")
@@ -933,6 +949,7 @@ def draft_operation(pair_id: str, body: OperationBody, user=Depends(auth)):
         elif before["content_hash"] != body.expected_hash:
             raise HTTPException(409, "源内容已变化，请刷新后重新核对")
         op = Operation(
+            scan_run_id=run.id,
             pair_id=pair.id,
             user_id=user.id,
             kind=body.kind,
@@ -968,7 +985,8 @@ def operations(page: int = 1, s=Depends(db), user=Depends(auth)):
 
 @app.get("/api/pairs/{pair_id}/history")
 def history(pair_id: str, s=Depends(db), user=Depends(auth)):
-    get(s, Pair, pair_id)
+    pair, models = get_pair(s, pair_id)
+    Decision = models.Decision
     return [
         serialize(d)
         for d in s.scalars(
